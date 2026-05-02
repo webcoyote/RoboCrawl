@@ -648,7 +648,7 @@ bubbleMesh.visible = false;
 playerGroup.add(bubbleMesh);
 
 // Orbiter: three rotating spheres around the player.
-type Orbiter = { mesh: THREE.Mesh; angle: number };
+type Orbiter = { mesh: THREE.Mesh; angle: number; hp: number; iframes: number };
 const orbiters: Orbiter[] = [];
 const orbiterGeo = new THREE.SphereGeometry(0.3, 12, 10);
 const orbiterMat = new THREE.MeshStandardMaterial({
@@ -657,6 +657,7 @@ const orbiterMat = new THREE.MeshStandardMaterial({
 const ORBITER_RADIUS = 1.6;
 const ORBITER_ANGULAR_SPEED = 3.0; // rad/sec
 const ORBITER_DAMAGE = 5;
+const ORBITER_HP_MAX = 5;
 
 function startBubbleShield() {
   endShield();
@@ -676,7 +677,7 @@ function startOrbiterShield() {
     mesh.position.y = 0.95;
     mesh.castShadow = true;
     scene.add(mesh);
-    orbiters.push({ mesh, angle: (i / 3) * Math.PI * 2 });
+    orbiters.push({ mesh, angle: (i / 3) * Math.PI * 2, hp: ORBITER_HP_MAX, iframes: 0 });
   }
   updateHud();
 }
@@ -726,27 +727,35 @@ function updateShield(dt: number) {
       const pz = playerGroup.position.z + Math.sin(o.angle) * ORBITER_RADIUS;
       o.mesh.position.set(px, 0.95, pz);
       o.mesh.rotation.y += dt * 6;
+      if (o.iframes > 0) o.iframes -= dt;
 
-      let consumed = false;
-      for (let j = enemies.length - 1; j >= 0; j--) {
-        const e = enemies[j];
-        const dx = px - e.mesh.position.x;
-        const dz = pz - e.mesh.position.z;
-        const r = e.radius + 0.3;
-        if (dx * dx + dz * dz < r * r) {
-          e.hp -= ORBITER_DAMAGE;
-          e.hitFlash = 0.18;
-          if (e.hp <= 0) {
-            scene.remove(e.mesh);
-            (e.mesh.material as THREE.MeshStandardMaterial).dispose();
-            enemies.splice(j, 1);
-            score += e.scoreValue;
+      // While not in i-frames, the first overlapping enemy takes damage and
+      // the orbiter loses 1 HP. Brief i-frames prevent draining all HP in one
+      // sustained overlap.
+      if (o.iframes <= 0) {
+        for (let j = enemies.length - 1; j >= 0; j--) {
+          const e = enemies[j];
+          const dx = px - e.mesh.position.x;
+          const dz = pz - e.mesh.position.z;
+          const r = e.radius + 0.3;
+          if (dx * dx + dz * dz < r * r) {
+            e.hp -= ORBITER_DAMAGE;
+            e.hitFlash = 0.18;
+            if (e.hp <= 0) {
+              scene.remove(e.mesh);
+              (e.mesh.material as THREE.MeshStandardMaterial).dispose();
+              enemies.splice(j, 1);
+              score += e.scoreValue;
+            }
+            o.hp -= 1;
+            o.iframes = 0.15;
+            updateHud();
+            break;
           }
-          consumed = true;
-          break;
         }
       }
-      if (consumed) {
+
+      if (o.hp <= 0) {
         scene.remove(o.mesh);
         orbiters.splice(i, 1);
         updateHud();
@@ -1686,7 +1695,7 @@ function updateHud() {
   if (currentShield) {
     const info = SHIELD_INFO[currentShield];
     const detail = currentShield === 'bubble' ? ` (${bubbleHP})` :
-      currentShield === 'orbiter' ? ` (${orbiters.length})` : '';
+      currentShield === 'orbiter' ? ` (${orbiters.length}× ${orbiters.reduce((s, o) => s + Math.max(0, o.hp), 0)} HP)` : '';
     shieldEl.textContent = `Shield: ${info.label}${detail}`;
     shieldEl.style.color = '#' + info.color.toString(16).padStart(6, '0');
     shieldEl.style.display = 'block';
