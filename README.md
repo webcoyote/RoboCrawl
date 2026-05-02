@@ -2,6 +2,8 @@
 
 A browser-based, top-down arcade shooter built with [Three.js](https://threejs.org/) and TypeScript. You crawl forward through an endless corridor, dodging obstacles and gunning down whatever comes at you.
 
+[**Play it here**](https://webcoyote.github.io/RoboCrawl/)
+
 ![Robocrawl](./robocrawl.webp)
 
 ![Menu](./cheatmenu.webp)
