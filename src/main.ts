@@ -373,59 +373,66 @@ function spawnEnemyAhead() {
   });
 }
 
-// Streaming maintenance: generate chunks in range; despawn obstacles/enemies behind player.
+// Streaming maintenance: generate chunks in range; despawn obstacles/enemies far from player.
 function streamWorld() {
   const pz = playerGroup.position.z;
   // Player moves in -Z; "ahead" means smaller (more negative) z values.
+  // Symmetric keep-band so backing up regenerates terrain.
   const minZ = pz - STREAM_AHEAD;
-  const maxZ = pz + STREAM_BEHIND;
+  const maxZ = pz + STREAM_AHEAD;
   const minChunk = Math.floor(minZ / CHUNK_LEN);
   const maxChunk = Math.floor(maxZ / CHUNK_LEN);
   for (let c = minChunk; c <= maxChunk; c++) generateChunk(c);
 
-  // Despawn obstacles outside the keep-band.
+  // Despawn obstacles outside the keep-band; forget their chunks so they regenerate
+  // if the player returns.
   for (let i = obstacles.length - 1; i >= 0; i--) {
     const o = obstacles[i];
     if (o.z < minZ - CHUNK_LEN || o.z > maxZ + CHUNK_LEN) {
       despawnObstacle(o);
+      generatedChunks.delete(Math.floor(o.z / CHUNK_LEN));
       obstacles.splice(i, 1);
     }
   }
+  // Also forget any "empty" chunks that drifted out of range, so a future visit
+  // re-rolls their contents (rather than leaving them permanently empty).
+  for (const c of generatedChunks) {
+    if (c < minChunk - 1 || c > maxChunk + 1) generatedChunks.delete(c);
+  }
 
-  // Despawn enemies that fell far behind.
+  // Despawn enemies far in any direction.
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
-    if (e.mesh.position.z > pz + STREAM_BEHIND + 5) {
+    if (Math.abs(e.mesh.position.z - pz) > STREAM_AHEAD + 10) {
       scene.remove(e.mesh);
       (e.mesh.material as THREE.MeshStandardMaterial).dispose();
       enemies.splice(i, 1);
     }
   }
 
-  // Recycle ground tiles ahead of the player.
-  for (const t of groundTiles) {
-    while (t.centerZ - pz > TILE_LEN * 0.5) {
-      t.centerZ -= TILE_LEN * groundTiles.length;
-      t.ground.position.z = t.centerZ;
-      t.grid.position.z = t.centerZ;
-    }
-    while (pz - t.centerZ > TILE_LEN * 1.5) {
-      t.centerZ += TILE_LEN * groundTiles.length;
-      t.ground.position.z = t.centerZ;
-      t.grid.position.z = t.centerZ;
-    }
+  // Position ground/wall tiles symmetrically around the player so they're always
+  // visible in front and behind, regardless of movement direction.
+  // Tile k (k=0,1,...) is centered at: round(pz / TILE_LEN) * TILE_LEN + offset[k]
+  const baseZ = Math.round(pz / TILE_LEN) * TILE_LEN;
+  const offsets = [0, -TILE_LEN]; // one tile under player, one ahead
+  // If player is moving forward (-Z) put the second tile ahead; if moving back, put it behind.
+  // Simpler: place tiles symmetrically — one under, one in the direction away from baseZ.
+  // We have 2 tiles, so just place them at baseZ and baseZ - TILE_LEN if player is ahead of base,
+  // else baseZ and baseZ + TILE_LEN.
+  const secondOffset = pz <= baseZ ? -TILE_LEN : TILE_LEN;
+  offsets[1] = secondOffset;
+
+  for (let i = 0; i < groundTiles.length; i++) {
+    const t = groundTiles[i];
+    t.centerZ = baseZ + offsets[i];
+    t.ground.position.z = t.centerZ;
+    t.grid.position.z = t.centerZ;
   }
-  for (const w of wallTiles) {
-    while (w.centerZ - pz > TILE_LEN * 0.5) {
-      w.centerZ -= TILE_LEN * wallTiles.length;
-      w.left.position.z = w.centerZ;
-      w.right.position.z = w.centerZ;
-    }
-    while (pz - w.centerZ > TILE_LEN * 1.5) {
-      w.centerZ += TILE_LEN * wallTiles.length;
-      w.left.position.z = w.centerZ;
-      w.right.position.z = w.centerZ;
-    }
+  for (let i = 0; i < wallTiles.length; i++) {
+    const w = wallTiles[i];
+    w.centerZ = baseZ + offsets[i];
+    w.left.position.z = w.centerZ;
+    w.right.position.z = w.centerZ;
   }
 }
 
