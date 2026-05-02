@@ -397,7 +397,10 @@ scene.add(playerGroup);
 const playerVel = new THREE.Vector3();
 const playerSpeed = 14;
 const MAX_HP = 25;
+const OVERHEAL_CAP = Math.floor(MAX_HP * 1.5);
+const OVERHEAL_DECAY_PER_SEC = 0.25; // points/sec while above MAX_HP
 let playerHP = MAX_HP;
+let overhealRemainder = 0; // sub-integer carry so decay is smooth across frames
 let score = 0;
 let playerHitFlash = 0;
 const PLAYER_BASE_EMISSIVE = bodyMat.emissiveIntensity;
@@ -681,11 +684,24 @@ function updateHealthPickups(dt: number) {
     const dx = p.x - playerGroup.position.x;
     const dz = p.z - playerGroup.position.z;
     if (dx * dx + dz * dz < (p.radius + playerRadius + 0.2) * (p.radius + playerRadius + 0.2)) {
-      playerHP = Math.min(MAX_HP, playerHP + p.heal);
+      playerHP = Math.min(OVERHEAL_CAP, playerHP + p.heal);
       scene.remove(p.mesh);
       p.mesh.geometry.dispose();
       healthPickups.splice(i, 1);
     }
+  }
+
+  // Overheal decays back down to MAX_HP at OVERHEAL_DECAY_PER_SEC, smoothed via
+  // a sub-integer carry so HUD HP ticks down at the right rate.
+  if (playerHP > MAX_HP) {
+    overhealRemainder += OVERHEAL_DECAY_PER_SEC * dt;
+    while (overhealRemainder >= 1 && playerHP > MAX_HP) {
+      playerHP -= 1;
+      overhealRemainder -= 1;
+    }
+    if (playerHP <= MAX_HP) overhealRemainder = 0;
+  } else {
+    overhealRemainder = 0;
   }
 }
 
@@ -760,6 +776,7 @@ function restart() {
 
   playerGroup.position.set(0, 0, 0);
   playerHP = MAX_HP;
+  overhealRemainder = 0;
   playerHitFlash = 0;
   damageFlashTimer = 0;
   damageFlashEl.style.opacity = '0';
