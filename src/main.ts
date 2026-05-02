@@ -234,17 +234,50 @@ type Enemy = {
   mesh: THREE.Mesh;
   speed: number;
   hp: number;
+  maxHp: number;
   radius: number;
+  scoreValue: number;
+  hitFlash: number;
+  baseEmissive: number;
 };
 const enemies: Enemy[] = [];
 
-const grunt = {
-  geo: new THREE.BoxGeometry(0.9, 1.1, 0.9),
-  mat: new THREE.MeshStandardMaterial({ color: 0xff4466, emissive: 0x551122, emissiveIntensity: 0.5 }),
+type EnemyTier = {
+  geo: THREE.BufferGeometry;
+  mat: THREE.MeshStandardMaterial;
+  baseRadius: number;
+  baseHeight: number;
+  baseSpeed: number;
+  baseHp: number;
+  scoreValue: number;
 };
-const brute = {
-  geo: new THREE.BoxGeometry(1.4, 1.6, 1.4),
+
+const grunt: EnemyTier = {
+  geo: new THREE.BoxGeometry(1, 1, 1),
+  mat: new THREE.MeshStandardMaterial({ color: 0xff4466, emissive: 0x551122, emissiveIntensity: 0.5 }),
+  baseRadius: 0.55,
+  baseHeight: 1.1,
+  baseSpeed: 5.0,
+  baseHp: 1,
+  scoreValue: 10,
+};
+const brute: EnemyTier = {
+  geo: new THREE.BoxGeometry(1, 1, 1),
   mat: new THREE.MeshStandardMaterial({ color: 0xaa22cc, emissive: 0x441155, emissiveIntensity: 0.5 }),
+  baseRadius: 0.9,
+  baseHeight: 1.6,
+  baseSpeed: 3.2,
+  baseHp: 3,
+  scoreValue: 25,
+};
+const titan: EnemyTier = {
+  geo: new THREE.BoxGeometry(1, 1, 1),
+  mat: new THREE.MeshStandardMaterial({ color: 0xff9922, emissive: 0x663300, emissiveIntensity: 0.6 }),
+  baseRadius: 1.4,
+  baseHeight: 2.2,
+  baseSpeed: 2.4,
+  baseHp: 8,
+  scoreValue: 60,
 };
 
 function spawnEnemyAtEdge() {
@@ -265,17 +298,39 @@ function spawnEnemyAtEdge() {
     if (!blocked) break;
   }
 
-  const isBrute = Math.random() < Math.min(0.15 + wave * 0.04, 0.5);
-  const def = isBrute ? brute : grunt;
-  const mesh = new THREE.Mesh(def.geo, def.mat);
-  mesh.position.set(x, isBrute ? 0.8 : 0.55, z);
+  // Pick tier: titans appear later, brutes scale with wave, rest are grunts.
+  const r = Math.random();
+  const titanChance = Math.min(Math.max(0, (wave - 2) * 0.05), 0.2);
+  const bruteChance = Math.min(0.15 + wave * 0.04, 0.45);
+  let tier: EnemyTier;
+  if (r < titanChance) tier = titan;
+  else if (r < titanChance + bruteChance) tier = brute;
+  else tier = grunt;
+
+  // Per-enemy size jitter so HP varies even within a tier.
+  const sizeMul = 0.85 + Math.random() * 0.4; // 0.85x..1.25x
+  const radius = tier.baseRadius * sizeMul;
+  const height = tier.baseHeight * sizeMul;
+  // HP scales with volume (size^3), rounded up so bigger = tougher.
+  const hp = Math.max(1, Math.round(tier.baseHp * Math.pow(sizeMul, 3)));
+  // Bigger enemies are slower; light wave-based ramp on top.
+  const speed = (tier.baseSpeed / sizeMul) + wave * 0.12;
+
+  const mat = tier.mat.clone();
+  const mesh = new THREE.Mesh(tier.geo, mat);
+  mesh.scale.set(radius * 2, height, radius * 2);
+  mesh.position.set(x, height / 2, z);
   mesh.castShadow = true;
   scene.add(mesh);
   enemies.push({
     mesh,
-    speed: isBrute ? 3.2 + wave * 0.1 : 5.0 + wave * 0.15,
-    hp: isBrute ? 3 : 1,
-    radius: isBrute ? 0.9 : 0.55,
+    speed,
+    hp,
+    maxHp: hp,
+    radius,
+    scoreValue: Math.round(tier.scoreValue * Math.pow(sizeMul, 2)),
+    hitFlash: 0,
+    baseEmissive: mat.emissiveIntensity,
   });
 }
 
@@ -299,7 +354,10 @@ updateHud();
 
 // --- Restart ---
 function restart() {
-  for (const e of enemies) scene.remove(e.mesh);
+  for (const e of enemies) {
+    scene.remove(e.mesh);
+    (e.mesh.material as THREE.MeshStandardMaterial).dispose();
+  }
   enemies.length = 0;
   for (const b of bullets) scene.remove(b.mesh);
   bullets.length = 0;
@@ -420,11 +478,13 @@ function animate() {
         const dz = b.mesh.position.z - e.mesh.position.z;
         if (dx * dx + dz * dz < (e.radius + 0.18) * (e.radius + 0.18)) {
           e.hp -= 1;
+          e.hitFlash = 0.12;
           hit = true;
           if (e.hp <= 0) {
             scene.remove(e.mesh);
+            (e.mesh.material as THREE.MeshStandardMaterial).dispose();
             enemies.splice(j, 1);
-            score += 10;
+            score += e.scoreValue;
           }
           break;
         }
@@ -448,6 +508,14 @@ function animate() {
       e.mesh.position.z += (dz / dist) * e.speed * dt;
       resolveObstacles(e.mesh.position, e.radius);
       e.mesh.rotation.y += dt * 2;
+
+      // Hit flash: briefly boost emissive intensity when shot
+      if (e.hitFlash > 0) {
+        e.hitFlash -= dt;
+        const mat = e.mesh.material as THREE.MeshStandardMaterial;
+        mat.emissiveIntensity = e.baseEmissive + (e.hitFlash > 0 ? 2.5 : 0);
+        if (e.hitFlash <= 0) mat.emissiveIntensity = e.baseEmissive;
+      }
 
       // Touch damage
       if (dist < e.radius + playerRadius) {
