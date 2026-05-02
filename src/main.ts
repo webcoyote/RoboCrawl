@@ -323,8 +323,12 @@ scene.add(playerGroup);
 // --- Player state ---
 const playerVel = new THREE.Vector3();
 const playerSpeed = 14;
-let playerHP = 5;
+const MAX_HP = 25;
+let playerHP = MAX_HP;
 let score = 0;
+let playerHitFlash = 0;
+const PLAYER_BASE_EMISSIVE = bodyMat.emissiveIntensity;
+const PLAYER_BASE_COLOR = bodyMat.color.getHex();
 let maxDistance = 0;       // furthest forward (-Z) the player has reached
 let gameOver = false;
 let paused = false;
@@ -545,11 +549,42 @@ function streamWorld() {
   }
 }
 
+const damageFlashEl = document.getElementById('damageFlash')!;
+let damageFlashTimer = 0;
+
+function damagePlayer(n: number) {
+  if (gameOver) return;
+  playerHP = Math.max(0, playerHP - n);
+  playerHitFlash = 0.25;
+  damageFlashTimer = 0.25;
+  damageFlashEl.style.opacity = '1';
+  if (playerHP <= 0) killPlayer();
+}
+
 function killPlayer() {
   if (gameOver) return;
   gameOver = true;
   overlayEl.innerHTML = `GAME OVER<br><span style="font-size:18px">Score: ${score} — Distance: ${Math.floor(maxDistance)}m<br>Press ENTER to restart</span>`;
   overlayEl.style.display = 'block';
+}
+
+function updatePlayerDamageVisuals(dt: number) {
+  if (playerHitFlash > 0) {
+    playerHitFlash -= dt;
+    const t = Math.max(0, playerHitFlash / 0.25); // 1 -> 0
+    bodyMat.emissiveIntensity = PLAYER_BASE_EMISSIVE + t * 3.0;
+    bodyMat.emissive.setHex(0xff2233);
+    bodyMat.color.setHex(0xff5577);
+    if (playerHitFlash <= 0) {
+      bodyMat.emissiveIntensity = PLAYER_BASE_EMISSIVE;
+      bodyMat.emissive.setHex(0x114466);
+      bodyMat.color.setHex(PLAYER_BASE_COLOR);
+    }
+  }
+  if (damageFlashTimer > 0) {
+    damageFlashTimer -= dt;
+    if (damageFlashTimer <= 0) damageFlashEl.style.opacity = '0';
+  }
 }
 
 function updateMist(dt: number) {
@@ -569,8 +604,7 @@ function updateMist(dt: number) {
     mistDamageTimer -= dt;
     if (mistDamageTimer <= 0) {
       mistDamageTimer = MIST_DAMAGE_INTERVAL;
-      playerHP -= 1;
-      if (playerHP <= 0) killPlayer();
+      damagePlayer(1);
     }
   } else {
     // Tiny leak so first tick after entering doesn't take a full interval.
@@ -618,7 +652,13 @@ function restart() {
   baseSeed = (Math.random() * 0xffffffff) >>> 0;
 
   playerGroup.position.set(0, 0, 0);
-  playerHP = 5;
+  playerHP = MAX_HP;
+  playerHitFlash = 0;
+  damageFlashTimer = 0;
+  damageFlashEl.style.opacity = '0';
+  bodyMat.emissiveIntensity = PLAYER_BASE_EMISSIVE;
+  bodyMat.emissive.setHex(0x114466);
+  bodyMat.color.setHex(PLAYER_BASE_COLOR);
   score = 0;
   maxDistance = 0;
   gameOver = false;
@@ -786,16 +826,16 @@ function animate() {
       }
 
       if (dist < e.radius + playerRadius) {
-        playerHP -= 1;
         e.mesh.position.x -= (dx / dist) * 2;
         e.mesh.position.z -= (dz / dist) * 2;
-        if (playerHP <= 0) killPlayer();
+        damagePlayer(1);
       }
     }
 
     streamWorld();
     updateMist(dt);
     updateEnemySpawning(dt);
+    updatePlayerDamageVisuals(dt);
 
     updateHud();
     updateCamera();

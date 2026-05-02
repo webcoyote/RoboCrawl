@@ -44,6 +44,16 @@
       display: none;
       pointer-events: none;
     }
+    #damageFlash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0;
+      background: radial-gradient(ellipse at center,
+        rgba(255, 0, 0, 0) 35%,
+        rgba(255, 0, 0, 0.55) 95%);
+      transition: opacity 0.18s ease-out;
+    }
   </style>
 </head>
 <body>
@@ -53,10 +63,11 @@
     <div>ESC to pause/resume</div>
   </div>
   <div id="stats">
-    <div id="hp">HP: 5</div>
+    <div id="hp">HP: 25</div>
     <div id="score">Score: 0</div>
     <div id="wave">Distance: 0m</div>
   </div>
+  <div id="damageFlash"></div>
   <div id="overlay"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>
