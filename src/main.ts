@@ -92,14 +92,26 @@ let playerHP = 5;
 let score = 0;
 let wave = 1;
 let gameOver = false;
+let paused = false;
 
 // --- Input ---
 const keys: Record<string, boolean> = {};
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (gameOver && e.code === 'Enter') restart();
+  else if (e.code === 'Escape' && !gameOver) togglePause();
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+function togglePause() {
+  paused = !paused;
+  if (paused) {
+    overlayEl.innerHTML = `PAUSED<br><span style="font-size:18px">Press ESC to resume</span>`;
+    overlayEl.style.display = 'block';
+  } else {
+    overlayEl.style.display = 'none';
+  }
+}
 
 // Mouse aim — track world-space cursor position projected onto the ground plane
 const mouseNDC = new THREE.Vector2(0, 0);
@@ -233,6 +245,13 @@ function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min
 
 function animate() {
   requestAnimationFrame(animate);
+
+  if (paused) {
+    clock.getDelta(); // drain so we don't accumulate while paused
+    renderer.render(scene, camera);
+    return;
+  }
+
   const dt = Math.min(clock.getDelta(), 0.05);
 
   if (!gameOver) {
