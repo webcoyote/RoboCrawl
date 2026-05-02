@@ -17,7 +17,6 @@ document.body.appendChild(renderer.domElement);
 scene.add(new THREE.AmbientLight(0x6680aa, 0.55));
 
 const sunLight = new THREE.DirectionalLight(0xfff0d8, 1.0);
-sunLight.position.set(20, 40, 20);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.width = 2048;
 sunLight.shadow.mapSize.height = 2048;
@@ -28,44 +27,71 @@ sunLight.shadow.camera.right = 60;
 sunLight.shadow.camera.top = 60;
 sunLight.shadow.camera.bottom = -60;
 scene.add(sunLight);
+// We aim the directional light at the player; both light + target follow.
+sunLight.target = new THREE.Object3D();
+scene.add(sunLight.target);
 
-// --- Arena ---
-const ARENA = 50; // half-extent of square arena
+// --- World ---
+// Lane is bounded on X, infinite on Z. Forward is -Z (the camera looks toward +Z).
+const LANE_HALF = 25;          // X half-extent (corridor width)
+const TILE_LEN = 100;           // Z length of each ground/grid tile
+const STREAM_AHEAD = 90;        // spawn terrain/enemies up to this far ahead of player (in -Z)
+const STREAM_BEHIND = 40;       // keep things this far behind before recycling/despawning
+const CHUNK_LEN = 20;           // terrain chunk length on Z
 
-const groundGeo = new THREE.PlaneGeometry(ARENA * 2, ARENA * 2, 20, 20);
+// --- Ground & grid (two tiles that leapfrog along Z) ---
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a3340 });
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.rotation.x = -Math.PI / 2;
-ground.receiveShadow = true;
-scene.add(ground);
+const groundGeo = new THREE.PlaneGeometry(LANE_HALF * 2, TILE_LEN, 10, 20);
 
-// Grid overlay for tron-y vibe
-const grid = new THREE.GridHelper(ARENA * 2, 40, 0x44ddff, 0x224466);
-(grid.material as THREE.Material).transparent = true;
-(grid.material as THREE.Material).opacity = 0.35;
-grid.position.y = 0.01;
-scene.add(grid);
+type GroundTile = { ground: THREE.Mesh; grid: THREE.GridHelper; centerZ: number };
+const groundTiles: GroundTile[] = [];
 
-// Walls around arena
+function makeGroundTile(centerZ: number): GroundTile {
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(0, 0, centerZ);
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // GridHelper is square; we use one with TILE_LEN side and crop visually via fog.
+  const grid = new THREE.GridHelper(TILE_LEN, 20, 0x44ddff, 0x224466);
+  (grid.material as THREE.Material).transparent = true;
+  (grid.material as THREE.Material).opacity = 0.35;
+  grid.position.set(0, 0.01, centerZ);
+  scene.add(grid);
+
+  return { ground, grid, centerZ };
+}
+groundTiles.push(makeGroundTile(0));
+groundTiles.push(makeGroundTile(-TILE_LEN));
+
+// --- Walls (long strips, also recycled along Z) ---
 const wallMat = new THREE.MeshStandardMaterial({ color: 0x44ddff, emissive: 0x2288aa, emissiveIntensity: 0.4 });
 const wallHeight = 1.5;
 const wallThickness = 1;
-function addWall(x: number, z: number, w: number, d: number) {
-  const geo = new THREE.BoxGeometry(w, wallHeight, d);
-  const wall = new THREE.Mesh(geo, wallMat);
-  wall.position.set(x, wallHeight / 2, z);
-  wall.castShadow = true;
-  wall.receiveShadow = true;
-  scene.add(wall);
+const wallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, TILE_LEN);
+
+type WallTile = { left: THREE.Mesh; right: THREE.Mesh; centerZ: number };
+const wallTiles: WallTile[] = [];
+
+function makeWallTile(centerZ: number): WallTile {
+  const left = new THREE.Mesh(wallGeo, wallMat);
+  left.position.set(-LANE_HALF, wallHeight / 2, centerZ);
+  left.castShadow = true;
+  left.receiveShadow = true;
+  scene.add(left);
+  const right = new THREE.Mesh(wallGeo, wallMat);
+  right.position.set(LANE_HALF, wallHeight / 2, centerZ);
+  right.castShadow = true;
+  right.receiveShadow = true;
+  scene.add(right);
+  return { left, right, centerZ };
 }
-addWall(0, -ARENA, ARENA * 2 + wallThickness, wallThickness);
-addWall(0, ARENA, ARENA * 2 + wallThickness, wallThickness);
-addWall(-ARENA, 0, wallThickness, ARENA * 2 + wallThickness);
-addWall(ARENA, 0, wallThickness, ARENA * 2 + wallThickness);
+wallTiles.push(makeWallTile(0));
+wallTiles.push(makeWallTile(-TILE_LEN));
 
 // --- Terrain features ---
-// Solid obstacles that block player movement and bullets.
-type Obstacle = { x: number; z: number; radius: number };
+type Obstacle = { mesh: THREE.Mesh; extras: THREE.Mesh[]; x: number; z: number; radius: number };
 const obstacles: Obstacle[] = [];
 
 const rockMat = new THREE.MeshStandardMaterial({ color: 0x4a5566, roughness: 0.9 });
@@ -76,13 +102,20 @@ const pylonMat = new THREE.MeshStandardMaterial({
   color: 0xff66aa, emissive: 0x661133, emissiveIntensity: 0.6,
 });
 
-function tryPlace(radius: number, minDistFromCenter: number): { x: number; z: number } | null {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const x = (Math.random() - 0.5) * (ARENA * 2 - 6);
-    const z = (Math.random() - 0.5) * (ARENA * 2 - 6);
-    if (Math.hypot(x, z) < minDistFromCenter) continue;
+// Track which Z chunks have been generated. Chunks are indexed by floor(z / CHUNK_LEN).
+const generatedChunks = new Set<number>();
+
+function tryPlaceInChunk(chunkIndex: number, radius: number, avoidNearOrigin: boolean): { x: number; z: number } | null {
+  const zMin = chunkIndex * CHUNK_LEN;
+  const zMax = zMin + CHUNK_LEN;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const x = (Math.random() - 0.5) * (LANE_HALF * 2 - 4);
+    const z = zMin + Math.random() * CHUNK_LEN;
+    if (avoidNearOrigin && Math.hypot(x, z) < 6) continue;
     let collides = false;
     for (const o of obstacles) {
+      // Cheap reject: only check obstacles in this chunk band
+      if (o.z < zMin - 2 || o.z > zMax + 2) continue;
       if (Math.hypot(x - o.x, z - o.z) < radius + o.radius + 1) { collides = true; break; }
     }
     if (!collides) return { x, z };
@@ -90,9 +123,9 @@ function tryPlace(radius: number, minDistFromCenter: number): { x: number; z: nu
   return null;
 }
 
-function spawnRock() {
+function spawnRockInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
   const radius = 0.9 + Math.random() * 0.8;
-  const pos = tryPlace(radius, 6);
+  const pos = tryPlaceInChunk(chunkIndex, radius, avoidNearOrigin);
   if (!pos) return;
   const geo = new THREE.DodecahedronGeometry(radius, 0);
   const mesh = new THREE.Mesh(geo, rockMat);
@@ -101,12 +134,12 @@ function spawnRock() {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   scene.add(mesh);
-  obstacles.push({ x: pos.x, z: pos.z, radius: radius * 0.85 });
+  obstacles.push({ mesh, extras: [], x: pos.x, z: pos.z, radius: radius * 0.85 });
 }
 
-function spawnCrystal() {
+function spawnCrystalInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
   const radius = 0.5 + Math.random() * 0.4;
-  const pos = tryPlace(radius, 6);
+  const pos = tryPlaceInChunk(chunkIndex, radius, avoidNearOrigin);
   if (!pos) return;
   const height = 1.8 + Math.random() * 1.2;
   const geo = new THREE.ConeGeometry(radius, height, 6);
@@ -115,12 +148,12 @@ function spawnCrystal() {
   mesh.rotation.y = Math.random() * Math.PI;
   mesh.castShadow = true;
   scene.add(mesh);
-  obstacles.push({ x: pos.x, z: pos.z, radius: radius * 0.85 });
+  obstacles.push({ mesh, extras: [], x: pos.x, z: pos.z, radius: radius * 0.85 });
 }
 
-function spawnPylon() {
+function spawnPylonInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
   const radius = 0.45;
-  const pos = tryPlace(radius, 8);
+  const pos = tryPlaceInChunk(chunkIndex, radius, avoidNearOrigin);
   if (!pos) return;
   const height = 3.2;
   const geo = new THREE.CylinderGeometry(radius, radius * 1.3, height, 6);
@@ -128,17 +161,34 @@ function spawnPylon() {
   mesh.position.set(pos.x, height / 2, pos.z);
   mesh.castShadow = true;
   scene.add(mesh);
-  // Glow cap
   const capGeo = new THREE.SphereGeometry(radius * 0.9, 12, 8);
   const cap = new THREE.Mesh(capGeo, crystalMat);
   cap.position.set(pos.x, height + 0.1, pos.z);
   scene.add(cap);
-  obstacles.push({ x: pos.x, z: pos.z, radius: radius * 1.3 });
+  obstacles.push({ mesh, extras: [cap], x: pos.x, z: pos.z, radius: radius * 1.3 });
 }
 
-for (let i = 0; i < 12; i++) spawnRock();
-for (let i = 0; i < 10; i++) spawnCrystal();
-for (let i = 0; i < 6; i++) spawnPylon();
+function generateChunk(chunkIndex: number) {
+  if (generatedChunks.has(chunkIndex)) return;
+  generatedChunks.add(chunkIndex);
+  // Skip the spawn-area chunk so the player doesn't start clipped into terrain.
+  const avoidNearOrigin = chunkIndex === 0 || chunkIndex === -1;
+  const rocks = 2 + Math.floor(Math.random() * 2);
+  const crystals = 1 + Math.floor(Math.random() * 2);
+  const pylons = Math.random() < 0.6 ? 1 : 0;
+  for (let i = 0; i < rocks; i++) spawnRockInChunk(chunkIndex, avoidNearOrigin);
+  for (let i = 0; i < crystals; i++) spawnCrystalInChunk(chunkIndex, avoidNearOrigin);
+  for (let i = 0; i < pylons; i++) spawnPylonInChunk(chunkIndex, avoidNearOrigin);
+}
+
+function despawnObstacle(o: Obstacle) {
+  scene.remove(o.mesh);
+  o.mesh.geometry.dispose();
+  for (const x of o.extras) {
+    scene.remove(x);
+    x.geometry.dispose();
+  }
+}
 
 // --- Player ---
 const playerRadius = 0.5;
@@ -151,7 +201,6 @@ body.castShadow = true;
 body.position.y = 0.85;
 playerGroup.add(body);
 
-// Gun barrel (points along -Z by default within the group, we rotate the group to aim)
 const gunGeo = new THREE.BoxGeometry(0.18, 0.18, 0.7);
 const gunMat = new THREE.MeshStandardMaterial({ color: 0xffcc44, emissive: 0x885500, emissiveIntensity: 0.6 });
 const gun = new THREE.Mesh(gunGeo, gunMat);
@@ -167,7 +216,7 @@ const playerVel = new THREE.Vector3();
 const playerSpeed = 14;
 let playerHP = 5;
 let score = 0;
-let wave = 1;
+let maxDistance = 0;       // furthest forward (-Z) the player has reached
 let gameOver = false;
 let paused = false;
 
@@ -190,7 +239,7 @@ function togglePause() {
   }
 }
 
-// Mouse aim — track world-space cursor position projected onto the ground plane
+// Mouse aim
 const mouseNDC = new THREE.Vector2(0, 0);
 const aimWorld = new THREE.Vector3();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -255,66 +304,61 @@ type EnemyTier = {
 const grunt: EnemyTier = {
   geo: new THREE.BoxGeometry(1, 1, 1),
   mat: new THREE.MeshStandardMaterial({ color: 0xff4466, emissive: 0x551122, emissiveIntensity: 0.5 }),
-  baseRadius: 0.55,
-  baseHeight: 1.1,
-  baseSpeed: 5.0,
-  baseHp: 1,
-  scoreValue: 10,
+  baseRadius: 0.55, baseHeight: 1.1, baseSpeed: 5.0, baseHp: 1, scoreValue: 10,
 };
 const brute: EnemyTier = {
   geo: new THREE.BoxGeometry(1, 1, 1),
   mat: new THREE.MeshStandardMaterial({ color: 0xaa22cc, emissive: 0x441155, emissiveIntensity: 0.5 }),
-  baseRadius: 0.9,
-  baseHeight: 1.6,
-  baseSpeed: 3.2,
-  baseHp: 3,
-  scoreValue: 25,
+  baseRadius: 0.9, baseHeight: 1.6, baseSpeed: 3.2, baseHp: 3, scoreValue: 25,
 };
 const titan: EnemyTier = {
   geo: new THREE.BoxGeometry(1, 1, 1),
   mat: new THREE.MeshStandardMaterial({ color: 0xff9922, emissive: 0x663300, emissiveIntensity: 0.6 }),
-  baseRadius: 1.4,
-  baseHeight: 2.2,
-  baseSpeed: 2.4,
-  baseHp: 8,
-  scoreValue: 60,
+  baseRadius: 1.4, baseHeight: 2.2, baseSpeed: 2.4, baseHp: 8, scoreValue: 60,
 };
 
-function spawnEnemyAtEdge() {
-  // Choose random edge spawn outside player vicinity and not inside an obstacle.
+// Spawn an enemy somewhere in the streamed-in band ahead of the player.
+function spawnEnemyAhead() {
+  // Ahead of player: more likely far ahead (so they appear out of fog).
+  // Difficulty scales with maxDistance.
+  const difficulty = maxDistance / 200; // 0 at start, 1 at 200m forward, etc.
+
   let x = 0, z = 0;
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const side = Math.floor(Math.random() * 4);
-    const t = (Math.random() - 0.5) * (ARENA * 2 - 4);
-    if (side === 0) { x = t; z = -ARENA + 2; }
-    else if (side === 1) { x = t; z = ARENA - 2; }
-    else if (side === 2) { x = -ARENA + 2; z = t; }
-    else { x = ARENA - 2; z = t; }
+  let placed = false;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    x = (Math.random() - 0.5) * (LANE_HALF * 2 - 4);
+    // Mostly ahead (player moves toward -Z). Sometimes spawn beside player.
+    const aheadBias = Math.random();
+    const dz = aheadBias < 0.85
+      ? -(20 + Math.random() * (STREAM_AHEAD - 20)) // 20..STREAM_AHEAD ahead
+      : (Math.random() - 0.5) * 30;                  // beside, on either side
+    z = playerGroup.position.z + dz;
+
+    // Don't spawn on top of the player.
     if (Math.hypot(x - playerGroup.position.x, z - playerGroup.position.z) < 12) continue;
+
     let blocked = false;
     for (const o of obstacles) {
+      if (Math.abs(o.z - z) > 5) continue;
       if (Math.hypot(x - o.x, z - o.z) < o.radius + 1.2) { blocked = true; break; }
     }
-    if (!blocked) break;
+    if (!blocked) { placed = true; break; }
   }
+  if (!placed) return;
 
-  // Pick tier: titans appear later, brutes scale with wave, rest are grunts.
   const r = Math.random();
-  const titanChance = Math.min(Math.max(0, (wave - 2) * 0.05), 0.2);
-  const bruteChance = Math.min(0.15 + wave * 0.04, 0.45);
+  const titanChance = Math.min(0.05 + difficulty * 0.15, 0.25);
+  const bruteChance = Math.min(0.2 + difficulty * 0.25, 0.5);
   let tier: EnemyTier;
   if (r < titanChance) tier = titan;
   else if (r < titanChance + bruteChance) tier = brute;
   else tier = grunt;
 
-  // Per-enemy size jitter so HP varies even within a tier.
-  const sizeMul = 0.85 + Math.random() * 0.4; // 0.85x..1.25x
+  const sizeMul = 0.85 + Math.random() * 0.4;
   const radius = tier.baseRadius * sizeMul;
   const height = tier.baseHeight * sizeMul;
-  // HP scales with volume (size^3), rounded up so bigger = tougher.
   const hp = Math.max(1, Math.round(tier.baseHp * Math.pow(sizeMul, 3)));
-  // Bigger enemies are slower; light wave-based ramp on top.
-  const speed = (tier.baseSpeed / sizeMul) + wave * 0.12;
+  const speed = (tier.baseSpeed / sizeMul) + difficulty * 1.5;
 
   const mat = tier.mat.clone();
   const mesh = new THREE.Mesh(tier.geo, mat);
@@ -323,32 +367,89 @@ function spawnEnemyAtEdge() {
   mesh.castShadow = true;
   scene.add(mesh);
   enemies.push({
-    mesh,
-    speed,
-    hp,
-    maxHp: hp,
-    radius,
+    mesh, speed, hp, maxHp: hp, radius,
     scoreValue: Math.round(tier.scoreValue * Math.pow(sizeMul, 2)),
-    hitFlash: 0,
-    baseEmissive: mat.emissiveIntensity,
+    hitFlash: 0, baseEmissive: mat.emissiveIntensity,
   });
 }
 
-function startWave() {
-  const count = 6 + wave * 2;
-  for (let i = 0; i < count; i++) spawnEnemyAtEdge();
+// Streaming maintenance: generate chunks in range; despawn obstacles/enemies behind player.
+function streamWorld() {
+  const pz = playerGroup.position.z;
+  // Player moves in -Z; "ahead" means smaller (more negative) z values.
+  const minZ = pz - STREAM_AHEAD;
+  const maxZ = pz + STREAM_BEHIND;
+  const minChunk = Math.floor(minZ / CHUNK_LEN);
+  const maxChunk = Math.floor(maxZ / CHUNK_LEN);
+  for (let c = minChunk; c <= maxChunk; c++) generateChunk(c);
+
+  // Despawn obstacles outside the keep-band.
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const o = obstacles[i];
+    if (o.z < minZ - CHUNK_LEN || o.z > maxZ + CHUNK_LEN) {
+      despawnObstacle(o);
+      obstacles.splice(i, 1);
+    }
+  }
+
+  // Despawn enemies that fell far behind.
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.mesh.position.z > pz + STREAM_BEHIND + 5) {
+      scene.remove(e.mesh);
+      (e.mesh.material as THREE.MeshStandardMaterial).dispose();
+      enemies.splice(i, 1);
+    }
+  }
+
+  // Recycle ground tiles ahead of the player.
+  for (const t of groundTiles) {
+    while (t.centerZ - pz > TILE_LEN * 0.5) {
+      t.centerZ -= TILE_LEN * groundTiles.length;
+      t.ground.position.z = t.centerZ;
+      t.grid.position.z = t.centerZ;
+    }
+    while (pz - t.centerZ > TILE_LEN * 1.5) {
+      t.centerZ += TILE_LEN * groundTiles.length;
+      t.ground.position.z = t.centerZ;
+      t.grid.position.z = t.centerZ;
+    }
+  }
+  for (const w of wallTiles) {
+    while (w.centerZ - pz > TILE_LEN * 0.5) {
+      w.centerZ -= TILE_LEN * wallTiles.length;
+      w.left.position.z = w.centerZ;
+      w.right.position.z = w.centerZ;
+    }
+    while (pz - w.centerZ > TILE_LEN * 1.5) {
+      w.centerZ += TILE_LEN * wallTiles.length;
+      w.left.position.z = w.centerZ;
+      w.right.position.z = w.centerZ;
+    }
+  }
 }
-startWave();
+
+// --- Enemy spawn pacing ---
+let spawnTimer = 0;
+function updateEnemySpawning(dt: number) {
+  spawnTimer -= dt;
+  // Target population scales with distance traveled.
+  const targetCount = Math.min(8 + Math.floor(maxDistance / 30), 30);
+  if (spawnTimer <= 0 && enemies.length < targetCount) {
+    spawnEnemyAhead();
+    spawnTimer = Math.max(0.25, 1.2 - maxDistance / 400);
+  }
+}
 
 // --- HUD ---
 const hpEl = document.getElementById('hp')!;
 const scoreEl = document.getElementById('score')!;
-const waveEl = document.getElementById('wave')!;
+const distEl = document.getElementById('wave')!; // reuse existing element
 const overlayEl = document.getElementById('overlay')!;
 function updateHud() {
   hpEl.textContent = `HP: ${playerHP}`;
   scoreEl.textContent = `Score: ${score}`;
-  waveEl.textContent = `Wave: ${wave}`;
+  distEl.textContent = `Distance: ${Math.floor(maxDistance)}m`;
 }
 updateHud();
 
@@ -361,21 +462,33 @@ function restart() {
   enemies.length = 0;
   for (const b of bullets) scene.remove(b.mesh);
   bullets.length = 0;
+  for (const o of obstacles) despawnObstacle(o);
+  obstacles.length = 0;
+  generatedChunks.clear();
+
   playerGroup.position.set(0, 0, 0);
   playerHP = 5;
   score = 0;
-  wave = 1;
+  maxDistance = 0;
   gameOver = false;
   overlayEl.style.display = 'none';
-  startWave();
+  streamWorld();
   updateHud();
 }
 
-// --- Camera (Diablo-style 3/4 isometric) ---
-const camOffset = new THREE.Vector3(0, 22, 18); // pitched-down view
+// Initial world population
+streamWorld();
+
+// --- Camera (Diablo-style 3/4 isometric, follows player on X and Z) ---
+const camOffset = new THREE.Vector3(0, 22, 18);
 function updateCamera() {
   camera.position.copy(playerGroup.position).add(camOffset);
   camera.lookAt(playerGroup.position.x, 0, playerGroup.position.z);
+
+  // Light follows player so shadows are always near them.
+  sunLight.position.set(playerGroup.position.x + 20, 40, playerGroup.position.z + 20);
+  sunLight.target.position.set(playerGroup.position.x, 0, playerGroup.position.z);
+  sunLight.target.updateMatrixWorld();
 }
 updateCamera();
 
@@ -384,7 +497,6 @@ const clock = new THREE.Clock();
 
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 
-// Push a circle out of any overlapping obstacles. Mutates pos.
 function resolveObstacles(pos: { x: number; z: number }, radius: number) {
   for (const o of obstacles) {
     const dx = pos.x - o.x;
@@ -414,7 +526,7 @@ function animate() {
   requestAnimationFrame(animate);
 
   if (paused) {
-    clock.getDelta(); // drain so we don't accumulate while paused
+    clock.getDelta();
     renderer.render(scene, camera);
     return;
   }
@@ -422,7 +534,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
 
   if (!gameOver) {
-    // --- Movement (camera-relative; in our top-down view that's just X/Z)
+    // --- Movement
     const moveDir = new THREE.Vector3();
     if (keys['KeyW'] || keys['ArrowUp']) moveDir.z -= 1;
     if (keys['KeyS'] || keys['ArrowDown']) moveDir.z += 1;
@@ -436,18 +548,22 @@ function animate() {
     playerGroup.position.x += playerVel.x * dt;
     playerGroup.position.z += playerVel.z * dt;
 
-    const limit = ARENA - 1.2;
+    // Clamp X only; Z is unbounded.
+    const limit = LANE_HALF - 1.2;
     playerGroup.position.x = clamp(playerGroup.position.x, -limit, limit);
-    playerGroup.position.z = clamp(playerGroup.position.z, -limit, limit);
 
     resolveObstacles(playerGroup.position, playerRadius);
 
-    // --- Aim: project mouse onto ground plane
+    // Track furthest forward distance (player moves in -Z).
+    const forward = -playerGroup.position.z;
+    if (forward > maxDistance) maxDistance = forward;
+
+    // --- Aim
     raycaster.setFromCamera(mouseNDC, camera);
     if (raycaster.ray.intersectPlane(groundPlane, aimWorld)) {
       const dx = aimWorld.x - playerGroup.position.x;
       const dz = aimWorld.z - playerGroup.position.z;
-      const yaw = Math.atan2(dx, dz) + Math.PI; // gun points along -Z within group
+      const yaw = Math.atan2(dx, dz) + Math.PI;
       playerGroup.rotation.y = yaw;
     }
 
@@ -456,7 +572,6 @@ function animate() {
     if (mouseDown && fireCooldown <= 0) {
       const dir = new THREE.Vector3(aimWorld.x - playerGroup.position.x, 0, aimWorld.z - playerGroup.position.z);
       if (dir.lengthSq() > 0.001) {
-        // Spawn at gun tip
         const muzzle = new THREE.Vector3(0, 0.95, -1.0).applyEuler(playerGroup.rotation).add(playerGroup.position);
         fireBullet(muzzle, dir);
         fireCooldown = fireInterval;
@@ -471,7 +586,6 @@ function animate() {
       b.life -= dt;
 
       let hit = false;
-      // collide with enemies
       for (let j = enemies.length - 1; j >= 0; j--) {
         const e = enemies[j];
         const dx = b.mesh.position.x - e.mesh.position.x;
@@ -492,8 +606,10 @@ function animate() {
 
       if (!hit && bulletHitsObstacle(b.mesh.position.x, b.mesh.position.z)) hit = true;
 
-      const oob = Math.abs(b.mesh.position.x) > ARENA || Math.abs(b.mesh.position.z) > ARENA;
-      if (hit || b.life <= 0 || oob) {
+      // X out-of-bounds (hit a side wall) or far behind player.
+      const oobX = Math.abs(b.mesh.position.x) > LANE_HALF;
+      const oobZ = Math.abs(b.mesh.position.z - playerGroup.position.z) > STREAM_AHEAD;
+      if (hit || b.life <= 0 || oobX || oobZ) {
         scene.remove(b.mesh);
         bullets.splice(i, 1);
       }
@@ -509,7 +625,6 @@ function animate() {
       resolveObstacles(e.mesh.position, e.radius);
       e.mesh.rotation.y += dt * 2;
 
-      // Hit flash: briefly boost emissive intensity when shot
       if (e.hitFlash > 0) {
         e.hitFlash -= dt;
         const mat = e.mesh.material as THREE.MeshStandardMaterial;
@@ -517,25 +632,20 @@ function animate() {
         if (e.hitFlash <= 0) mat.emissiveIntensity = e.baseEmissive;
       }
 
-      // Touch damage
       if (dist < e.radius + playerRadius) {
         playerHP -= 1;
-        // knock the enemy back so it doesn't drain HP every frame
         e.mesh.position.x -= (dx / dist) * 2;
         e.mesh.position.z -= (dz / dist) * 2;
         if (playerHP <= 0) {
           gameOver = true;
-          overlayEl.innerHTML = `GAME OVER<br><span style="font-size:18px">Score: ${score} — Wave ${wave}<br>Press ENTER to restart</span>`;
+          overlayEl.innerHTML = `GAME OVER<br><span style="font-size:18px">Score: ${score} — Distance: ${Math.floor(maxDistance)}m<br>Press ENTER to restart</span>`;
           overlayEl.style.display = 'block';
         }
       }
     }
 
-    // --- Wave progression
-    if (enemies.length === 0) {
-      wave += 1;
-      startWave();
-    }
+    streamWorld();
+    updateEnemySpawning(dt);
 
     updateHud();
     updateCamera();
