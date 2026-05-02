@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Three.js Game</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #000; cursor: crosshair; }
+    canvas { display: block; }
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      color: #fff;
+      font-family: monospace;
+      font-size: 14px;
+      pointer-events: none;
+      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+      line-height: 1.6;
+    }
+    #stats {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      color: #fff;
+      font-family: monospace;
+      font-size: 16px;
+      pointer-events: none;
+      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+      line-height: 1.6;
+      text-align: right;
+    }
+    #overlay {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #ff4466;
+      font-family: monospace;
+      font-size: 48px;
+      text-align: center;
+      text-shadow: 0 0 12px rgba(0,0,0,0.9);
+      display: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div>WASD / Arrows to move</div>
+    <div>MOUSE to aim &middot; CLICK / HOLD to shoot</div>
+  </div>
+  <div id="stats">
+    <div id="hp">HP: 5</div>
+    <div id="score">Score: 0</div>
+    <div id="wave">Wave: 1</div>
+  </div>
+  <div id="overlay"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
