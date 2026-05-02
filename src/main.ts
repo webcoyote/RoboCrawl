@@ -230,6 +230,75 @@ function despawnObstacle(o: Obstacle) {
   }
 }
 
+// --- Red mist (encroaches from behind) ---
+// `mistEdgeZ` is the leading (front) edge in world Z. Player is "inside the mist"
+// when player.z >= mistEdgeZ (i.e. behind the edge). Forward in this game is -Z.
+const MIST_INITIAL_OFFSET = 30;   // start this far behind the player
+const MIST_BASE_SPEED = 2.5;       // m/s forward
+const MIST_RAMP_PER_METER = 0.01;  // mist gets faster as you go further
+const MIST_MAX_DISTANCE = 60;      // never trail farther than this behind player
+const MIST_DAMAGE_INTERVAL = 0.5;  // seconds between damage ticks while inside
+let mistEdgeZ = MIST_INITIAL_OFFSET;
+let mistDamageTimer = 0;
+
+// Visual: a few horizontal slabs of varying height stacked above the ground inside
+// the mist region, plus a glowing leading line at the boundary. Vertex colors
+// fade alpha to 0 at the front edge so it dissolves smoothly.
+const MIST_DEPTH = 60;        // how far back the mist visually extends
+const MIST_HEIGHTS = [0.05, 1.0, 2.0]; // stack at multiple Y values for volumetric feel
+const mistGroup = new THREE.Group();
+scene.add(mistGroup);
+
+function makeMistSlab(yPos: number, opacityScale: number): THREE.Mesh {
+  // Plane lies in the XZ plane; width spans the lane, depth = MIST_DEPTH along +Z
+  // (so its front edge is at local z=0 and back edge at z=+MIST_DEPTH).
+  // We'll position the slab so local z=0 sits at the mist front edge.
+  const geo = new THREE.PlaneGeometry(LANE_HALF * 2, MIST_DEPTH, 1, 8);
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(0, 0, MIST_DEPTH / 2);
+
+  // Per-vertex alpha via vertex colors (alpha channel stored in color via separate attribute).
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 4);
+  for (let i = 0; i < pos.count; i++) {
+    const z = pos.getZ(i);
+    const t = Math.min(1, z / MIST_DEPTH);     // 0 at front edge, 1 at back
+    const alpha = Math.pow(t, 1.4) * opacityScale;
+    colors[i * 4 + 0] = 1.0;       // r
+    colors[i * 4 + 1] = 0.15;      // g
+    colors[i * 4 + 2] = 0.2;       // b
+    colors[i * 4 + 3] = alpha;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    fog: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.y = yPos;
+  return mesh;
+}
+const mistSlabs = MIST_HEIGHTS.map((y, i) => {
+  const slab = makeMistSlab(y, 0.55 - i * 0.12);
+  mistGroup.add(slab);
+  return slab;
+});
+
+// Bright leading line at the boundary so the player can read where it is.
+const mistEdgeLineMat = new THREE.MeshBasicMaterial({
+  color: 0xff5566, transparent: true, opacity: 0.9, depthWrite: false, fog: false,
+});
+const mistEdgeLineGeo = new THREE.PlaneGeometry(LANE_HALF * 2, 0.4);
+const mistEdgeLine = new THREE.Mesh(mistEdgeLineGeo, mistEdgeLineMat);
+mistEdgeLine.rotation.x = -Math.PI / 2;
+mistEdgeLine.position.y = 0.06;
+mistGroup.add(mistEdgeLine);
+void mistSlabs;
+
 // --- Player ---
 const playerRadius = 0.5;
 const playerGroup = new THREE.Group();
@@ -476,6 +545,39 @@ function streamWorld() {
   }
 }
 
+function killPlayer() {
+  if (gameOver) return;
+  gameOver = true;
+  overlayEl.innerHTML = `GAME OVER<br><span style="font-size:18px">Score: ${score} — Distance: ${Math.floor(maxDistance)}m<br>Press ENTER to restart</span>`;
+  overlayEl.style.display = 'block';
+}
+
+function updateMist(dt: number) {
+  // Speed grows with distance traveled.
+  const speed = MIST_BASE_SPEED + Math.max(0, maxDistance) * MIST_RAMP_PER_METER;
+  mistEdgeZ -= speed * dt; // forward = -Z
+
+  // Snap up to player if it falls too far behind (mist always closes in).
+  const minEdgeZ = playerGroup.position.z + MIST_MAX_DISTANCE;
+  if (mistEdgeZ > minEdgeZ) mistEdgeZ = minEdgeZ;
+
+  // Position visuals: leading edge of slabs at mistEdgeZ, extending toward +Z.
+  mistGroup.position.z = mistEdgeZ;
+
+  // Damage tick if player is inside the mist (i.e. behind its leading edge).
+  if (playerGroup.position.z >= mistEdgeZ) {
+    mistDamageTimer -= dt;
+    if (mistDamageTimer <= 0) {
+      mistDamageTimer = MIST_DAMAGE_INTERVAL;
+      playerHP -= 1;
+      if (playerHP <= 0) killPlayer();
+    }
+  } else {
+    // Tiny leak so first tick after entering doesn't take a full interval.
+    mistDamageTimer = Math.min(mistDamageTimer + dt * 0.5, MIST_DAMAGE_INTERVAL);
+  }
+}
+
 // --- Enemy spawn pacing ---
 let spawnTimer = 0;
 function updateEnemySpawning(dt: number) {
@@ -520,6 +622,8 @@ function restart() {
   score = 0;
   maxDistance = 0;
   gameOver = false;
+  mistEdgeZ = MIST_INITIAL_OFFSET;
+  mistDamageTimer = 0;
   overlayEl.style.display = 'none';
   streamWorld();
   updateHud();
@@ -685,15 +789,12 @@ function animate() {
         playerHP -= 1;
         e.mesh.position.x -= (dx / dist) * 2;
         e.mesh.position.z -= (dz / dist) * 2;
-        if (playerHP <= 0) {
-          gameOver = true;
-          overlayEl.innerHTML = `GAME OVER<br><span style="font-size:18px">Score: ${score} — Distance: ${Math.floor(maxDistance)}m<br>Press ENTER to restart</span>`;
-          overlayEl.style.display = 'block';
-        }
+        if (playerHP <= 0) killPlayer();
       }
     }
 
     streamWorld();
+    updateMist(dt);
     updateEnemySpawning(dt);
 
     updateHud();
