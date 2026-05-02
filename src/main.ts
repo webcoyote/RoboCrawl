@@ -273,6 +273,60 @@ function spawnHealthInChunk(rng: () => number, chunkIndex: number, avoidNearOrig
   placed.push({ x: pos.x, z: pos.z, radius: size * 0.9 });
 }
 
+// --- Shield pickups ---
+type ShieldPickup = {
+  mesh: THREE.Mesh;
+  x: number;
+  z: number;
+  radius: number;
+  shield: ShieldType;
+  bobPhase: number;
+};
+const shieldPickups: ShieldPickup[] = [];
+
+function spawnShieldInChunk(rng: () => number, chunkIndex: number, avoidNearOrigin: boolean, placed: Placed[]) {
+  const size = 1.0;
+  const pos = tryPlaceInChunk(rng, chunkIndex, size, avoidNearOrigin, placed);
+  if (!pos) return;
+  const shield: ShieldType = rng() < 0.5 ? 'bubble' : 'orbiter';
+  const info = SHIELD_INFO[shield];
+  const mat = new THREE.MeshStandardMaterial({
+    color: info.color, emissive: info.color, emissiveIntensity: 0.6, roughness: 0.3, metalness: 0.4,
+  });
+  const geo = new THREE.BoxGeometry(size, size, size);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(pos.x, size / 2 + 0.6, pos.z);
+  mesh.rotation.y = rng() * Math.PI;
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  // Visual marker on top: bubble = small sphere, orbiter = three small spheres on a ring.
+  if (shield === 'bubble') {
+    const markGeo = new THREE.SphereGeometry(size * 0.3, 12, 10);
+    const markMat = new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.7, fog: false });
+    const mark = new THREE.Mesh(markGeo, markMat);
+    mark.position.y = size * 0.7;
+    mesh.add(mark);
+  } else {
+    const markMat = new THREE.MeshBasicMaterial({ color: info.color, fog: false });
+    const markGeo = new THREE.SphereGeometry(size * 0.13, 8, 8);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      const mark = new THREE.Mesh(markGeo, markMat);
+      mark.position.set(Math.cos(a) * size * 0.45, size * 0.7, Math.sin(a) * size * 0.45);
+      mesh.add(mark);
+    }
+  }
+
+  shieldPickups.push({
+    mesh, x: pos.x, z: pos.z,
+    radius: size * 0.7,
+    shield,
+    bobPhase: rng() * Math.PI * 2,
+  });
+  placed.push({ x: pos.x, z: pos.z, radius: size * 0.9 });
+}
+
 // --- Weapon power-up pickups ---
 type PowerPickup = {
   mesh: THREE.Mesh;
@@ -335,6 +389,7 @@ function generateChunk(chunkIndex: number) {
   const smallHealth = rng() < 0.5 ? 1 : 0;
   const bigHealth = rng() < 0.12 ? 1 : 0;
   const power = rng() < 0.18 ? 1 : 0;
+  const shield = rng() < 0.10 ? 1 : 0;
   const placed: Placed[] = [];
   for (let i = 0; i < rocks; i++) spawnRockInChunk(rng, chunkIndex, avoidNearOrigin, placed);
   for (let i = 0; i < crystals; i++) spawnCrystalInChunk(rng, chunkIndex, avoidNearOrigin, placed);
@@ -342,6 +397,7 @@ function generateChunk(chunkIndex: number) {
   for (let i = 0; i < smallHealth; i++) spawnHealthInChunk(rng, chunkIndex, avoidNearOrigin, placed, false);
   for (let i = 0; i < bigHealth; i++) spawnHealthInChunk(rng, chunkIndex, avoidNearOrigin, placed, true);
   for (let i = 0; i < power; i++) spawnPowerInChunk(rng, chunkIndex, avoidNearOrigin, placed);
+  for (let i = 0; i < shield; i++) spawnShieldInChunk(rng, chunkIndex, avoidNearOrigin, placed);
 }
 
 function despawnObstacle(o: Obstacle) {
@@ -565,6 +621,143 @@ function clearPower() {
   updateHud();
 }
 
+// --- Shields ---
+type ShieldType = 'bubble' | 'orbiter';
+let currentShield: ShieldType | null = null;
+
+const SHIELD_INFO: Record<ShieldType, { color: number; label: string }> = {
+  bubble:  { color: 0x44aaff, label: 'BUBBLE SHIELD' },
+  orbiter: { color: 0xddaaff, label: 'ORBITER SHIELD' },
+};
+
+// Bubble: translucent sphere parented to player.
+const BUBBLE_HP_MAX = 8;
+let bubbleHP = 0;
+let bubbleHitFlash = 0;
+const bubbleGeo = new THREE.SphereGeometry(1.4, 24, 16);
+const bubbleMat = new THREE.MeshBasicMaterial({
+  color: 0x66bbff,
+  transparent: true,
+  opacity: 0.35,
+  depthWrite: false,
+  fog: false,
+});
+const bubbleMesh = new THREE.Mesh(bubbleGeo, bubbleMat);
+bubbleMesh.position.y = 0.85;
+bubbleMesh.visible = false;
+playerGroup.add(bubbleMesh);
+
+// Orbiter: three rotating spheres around the player.
+type Orbiter = { mesh: THREE.Mesh; angle: number };
+const orbiters: Orbiter[] = [];
+const orbiterGeo = new THREE.SphereGeometry(0.3, 12, 10);
+const orbiterMat = new THREE.MeshStandardMaterial({
+  color: 0xddaaff, emissive: 0xaa66ff, emissiveIntensity: 1.4, roughness: 0.3,
+});
+const ORBITER_RADIUS = 1.6;
+const ORBITER_ANGULAR_SPEED = 3.0; // rad/sec
+const ORBITER_DAMAGE = 5;
+
+function startBubbleShield() {
+  endShield();
+  currentShield = 'bubble';
+  bubbleHP = BUBBLE_HP_MAX;
+  bubbleHitFlash = 0;
+  bubbleMesh.visible = true;
+  bubbleMat.opacity = 0.35;
+  updateHud();
+}
+
+function startOrbiterShield() {
+  endShield();
+  currentShield = 'orbiter';
+  for (let i = 0; i < 3; i++) {
+    const mesh = new THREE.Mesh(orbiterGeo, orbiterMat);
+    mesh.position.y = 0.95;
+    mesh.castShadow = true;
+    scene.add(mesh);
+    orbiters.push({ mesh, angle: (i / 3) * Math.PI * 2 });
+  }
+  updateHud();
+}
+
+function startShield(type: ShieldType) {
+  if (type === 'bubble') startBubbleShield();
+  else startOrbiterShield();
+}
+
+function endShield() {
+  if (currentShield === 'bubble') {
+    bubbleMesh.visible = false;
+    bubbleHP = 0;
+  } else if (currentShield === 'orbiter') {
+    for (const o of orbiters) scene.remove(o.mesh);
+    orbiters.length = 0;
+  }
+  currentShield = null;
+  updateHud();
+}
+
+// Returns true if the shield absorbed all of the damage (no HP loss for player).
+function shieldAbsorbDamage(n: number): boolean {
+  if (currentShield !== 'bubble' || bubbleHP <= 0) return false;
+  bubbleHP -= n;
+  bubbleHitFlash = 0.2;
+  if (bubbleHP <= 0) endShield();
+  else updateHud();
+  return true;
+}
+
+function updateShield(dt: number) {
+  if (currentShield === 'bubble') {
+    if (bubbleHitFlash > 0) {
+      bubbleHitFlash -= dt;
+      const flash = Math.max(0, bubbleHitFlash / 0.2);
+      bubbleMat.opacity = 0.35 + flash * 0.5;
+    } else {
+      bubbleMat.opacity = 0.35;
+    }
+  } else if (currentShield === 'orbiter') {
+    // Rotate orbiters around the player and check collisions with enemies.
+    for (let i = orbiters.length - 1; i >= 0; i--) {
+      const o = orbiters[i];
+      o.angle += dt * ORBITER_ANGULAR_SPEED;
+      const px = playerGroup.position.x + Math.cos(o.angle) * ORBITER_RADIUS;
+      const pz = playerGroup.position.z + Math.sin(o.angle) * ORBITER_RADIUS;
+      o.mesh.position.set(px, 0.95, pz);
+      o.mesh.rotation.y += dt * 6;
+
+      let consumed = false;
+      for (let j = enemies.length - 1; j >= 0; j--) {
+        const e = enemies[j];
+        const dx = px - e.mesh.position.x;
+        const dz = pz - e.mesh.position.z;
+        const r = e.radius + 0.3;
+        if (dx * dx + dz * dz < r * r) {
+          e.hp -= ORBITER_DAMAGE;
+          e.hitFlash = 0.18;
+          if (e.hp <= 0) {
+            scene.remove(e.mesh);
+            (e.mesh.material as THREE.MeshStandardMaterial).dispose();
+            enemies.splice(j, 1);
+            score += e.scoreValue;
+          }
+          consumed = true;
+          break;
+        }
+      }
+      if (consumed) {
+        scene.remove(o.mesh);
+        orbiters.splice(i, 1);
+        updateHud();
+      }
+    }
+    if (orbiters.length === 0) {
+      endShield();
+    }
+  }
+}
+
 // --- Cheat menu (visible while paused) ---
 const cheatMenuEl = document.getElementById('cheatMenu')!;
 const cheatListEl = document.getElementById('cheatList')!;
@@ -574,7 +767,8 @@ function buildCheatMenu() {
   POWER_TYPES.forEach((power, i) => {
     const info = POWER_INFO[power];
     const li = document.createElement('li');
-    li.dataset.power = power;
+    li.dataset.kind = 'power';
+    li.dataset.id = power;
     li.innerHTML =
       `<span class="key">${i + 1}</span>` +
       `<span class="label">${info.label}</span>` +
@@ -582,20 +776,44 @@ function buildCheatMenu() {
     li.addEventListener('click', () => selectCheatPower(power));
     cheatListEl.appendChild(li);
   });
-  // Extra row to clear the active power.
+  // Clear-weapon row.
   const clearLi = document.createElement('li');
-  clearLi.dataset.power = '';
-  clearLi.innerHTML = `<span class="key">0</span><span class="label">— None —</span><span class="swatch" style="background:#222"></span>`;
+  clearLi.dataset.kind = 'power';
+  clearLi.dataset.id = '';
+  clearLi.innerHTML = `<span class="key">0</span><span class="label">— No Weapon —</span><span class="swatch" style="background:#222"></span>`;
   clearLi.addEventListener('click', () => selectCheatPower(null));
   cheatListEl.appendChild(clearLi);
+
+  // Shields.
+  const shieldDefs: Array<{ id: ShieldType | null; key: string; label: string; color: number }> = [
+    { id: 'bubble',  key: 'B', label: SHIELD_INFO.bubble.label,  color: SHIELD_INFO.bubble.color },
+    { id: 'orbiter', key: 'O', label: SHIELD_INFO.orbiter.label, color: SHIELD_INFO.orbiter.color },
+    { id: null,      key: 'X', label: '— No Shield —',           color: 0x222222 },
+  ];
+  for (const s of shieldDefs) {
+    const li = document.createElement('li');
+    li.dataset.kind = 'shield';
+    li.dataset.id = s.id ?? '';
+    li.innerHTML =
+      `<span class="key">${s.key}</span>` +
+      `<span class="label">${s.label}</span>` +
+      `<span class="swatch" style="background:#${s.color.toString(16).padStart(6, '0')}"></span>`;
+    li.addEventListener('click', () => selectCheatShield(s.id));
+    cheatListEl.appendChild(li);
+  }
 }
 buildCheatMenu();
 
 function refreshCheatMenuSelection() {
   const items = cheatListEl.querySelectorAll('li');
   items.forEach((li) => {
-    const p = (li as HTMLLIElement).dataset.power || null;
-    li.classList.toggle('selected', p === (currentPower ?? ''));
+    const el = li as HTMLLIElement;
+    const kind = el.dataset.kind;
+    const id = el.dataset.id || null;
+    const active = kind === 'power'  ? id === (currentPower  ?? '')
+                 : kind === 'shield' ? id === (currentShield ?? '')
+                 : false;
+    el.classList.toggle('selected', active);
   });
 }
 
@@ -613,13 +831,15 @@ function selectCheatPower(power: PowerType | null) {
   updateHud();
 }
 
+function selectCheatShield(shield: ShieldType | null) {
+  if (shield === null) endShield();
+  else startShield(shield);
+  refreshCheatMenuSelection();
+}
+
 // Returns true if the key was consumed by the cheat menu.
 function handleCheatKey(code: string): boolean {
-  if (code === 'Digit0') {
-    selectCheatPower(null);
-    return true;
-  }
-  // Digit1..Digit9 → POWER_TYPES[0..8]
+  if (code === 'Digit0') { selectCheatPower(null); return true; }
   const m = /^Digit([1-9])$/.exec(code);
   if (m) {
     const idx = parseInt(m[1], 10) - 1;
@@ -628,6 +848,9 @@ function handleCheatKey(code: string): boolean {
       return true;
     }
   }
+  if (code === 'KeyB') { selectCheatShield('bubble');  return true; }
+  if (code === 'KeyO') { selectCheatShield('orbiter'); return true; }
+  if (code === 'KeyX') { selectCheatShield(null);      return true; }
   return false;
 }
 
@@ -1236,6 +1459,23 @@ function streamWorld() {
       powerPickups.splice(i, 1);
     }
   }
+  // Despawn shield pickups outside the keep-band.
+  for (let i = shieldPickups.length - 1; i >= 0; i--) {
+    const p = shieldPickups[i];
+    if (p.z < minZ - CHUNK_LEN || p.z > maxZ + CHUNK_LEN) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      (p.mesh.material as THREE.MeshStandardMaterial).dispose();
+      for (const child of p.mesh.children) {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          (child.material as THREE.MeshBasicMaterial).dispose();
+        }
+      }
+      generatedChunks.delete(Math.floor(p.z / CHUNK_LEN));
+      shieldPickups.splice(i, 1);
+    }
+  }
 
   // Position ground/wall tiles symmetrically around the player so they're always
   // visible in front and behind, regardless of movement direction.
@@ -1266,13 +1506,16 @@ function streamWorld() {
 const damageFlashEl = document.getElementById('damageFlash')!;
 let damageFlashTimer = 0;
 
-function damagePlayer(n: number) {
-  if (gameOver) return;
+// Returns true if HP was actually deducted (i.e. shield did not absorb).
+function damagePlayer(n: number): boolean {
+  if (gameOver) return false;
+  if (shieldAbsorbDamage(n)) return false;
   playerHP = Math.max(0, playerHP - n);
   playerHitFlash = 0.25;
   damageFlashTimer = 0.25;
   damageFlashEl.style.opacity = '1';
   if (playerHP <= 0) killPlayer();
+  return true;
 }
 
 function killPlayer() {
@@ -1359,6 +1602,31 @@ function updatePowerPickups(dt: number) {
   }
 }
 
+function updateShieldPickups(dt: number) {
+  for (let i = shieldPickups.length - 1; i >= 0; i--) {
+    const p = shieldPickups[i];
+    p.bobPhase += dt * 1.6;
+    p.mesh.position.y = p.radius + 0.6 + Math.sin(p.bobPhase) * 0.2;
+    p.mesh.rotation.y += dt * 1.0;
+
+    const dx = p.x - playerGroup.position.x;
+    const dz = p.z - playerGroup.position.z;
+    if (dx * dx + dz * dz < (p.radius + playerRadius + 0.2) * (p.radius + playerRadius + 0.2)) {
+      startShield(p.shield);
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      (p.mesh.material as THREE.MeshStandardMaterial).dispose();
+      for (const child of p.mesh.children) {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          (child.material as THREE.MeshBasicMaterial).dispose();
+        }
+      }
+      shieldPickups.splice(i, 1);
+    }
+  }
+}
+
 function updateMist(dt: number) {
   // Speed grows with distance traveled.
   const speed = MIST_BASE_SPEED + Math.max(0, maxDistance) * MIST_RAMP_PER_METER;
@@ -1401,6 +1669,7 @@ const hpEl = document.getElementById('hp')!;
 const scoreEl = document.getElementById('score')!;
 const distEl = document.getElementById('wave')!; // reuse existing element
 const powerEl = document.getElementById('power')!;
+const shieldEl = document.getElementById('shield')!;
 const overlayEl = document.getElementById('overlay')!;
 function updateHud() {
   hpEl.textContent = `HP: ${playerHP}`;
@@ -1413,6 +1682,16 @@ function updateHud() {
     powerEl.style.display = 'block';
   } else {
     powerEl.style.display = 'none';
+  }
+  if (currentShield) {
+    const info = SHIELD_INFO[currentShield];
+    const detail = currentShield === 'bubble' ? ` (${bubbleHP})` :
+      currentShield === 'orbiter' ? ` (${orbiters.length})` : '';
+    shieldEl.textContent = `Shield: ${info.label}${detail}`;
+    shieldEl.style.color = '#' + info.color.toString(16).padStart(6, '0');
+    shieldEl.style.display = 'block';
+  } else {
+    shieldEl.style.display = 'none';
   }
 }
 updateHud();
@@ -1445,6 +1724,19 @@ function restart() {
     }
   }
   powerPickups.length = 0;
+  for (const p of shieldPickups) {
+    scene.remove(p.mesh);
+    p.mesh.geometry.dispose();
+    (p.mesh.material as THREE.MeshStandardMaterial).dispose();
+    for (const child of p.mesh.children) {
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        (child.material as THREE.MeshBasicMaterial).dispose();
+      }
+    }
+  }
+  shieldPickups.length = 0;
+  endShield();
   for (const lb of laserBeams) {
     scene.remove(lb.group);
     lb.core.geometry.dispose();
@@ -1663,8 +1955,7 @@ function animate() {
       if (dist < e.radius + playerRadius) {
         e.mesh.position.x -= (dx / dist) * 2;
         e.mesh.position.z -= (dz / dist) * 2;
-        damagePlayer(1);
-        clearPower();
+        if (damagePlayer(1)) clearPower();
       }
     }
 
@@ -1672,6 +1963,8 @@ function animate() {
     updateMist(dt);
     updateHealthPickups(dt);
     updatePowerPickups(dt);
+    updateShieldPickups(dt);
+    updateShield(dt);
     updateGrenades(dt);
     updateLaserBeams(dt);
     updateEnemySpawning(dt);
