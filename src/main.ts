@@ -102,6 +102,41 @@ const pylonMat = new THREE.MeshStandardMaterial({
   color: 0xff66aa, emissive: 0x661133, emissiveIntensity: 0.6,
 });
 
+// White box with red cross — used for the six faces of the health pickup.
+function makeHealthCrossTexture(): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  // White background
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, size, size);
+  // Thin border so seams between faces read clearly
+  ctx.strokeStyle = '#cccccc';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, size - 4, size - 4);
+  // Red cross
+  ctx.fillStyle = '#dd1122';
+  const t = size * 0.22;     // arm thickness
+  const m = (size - t) / 2;  // margin to center the bar
+  const inset = size * 0.14; // shorten arms slightly so cross floats inside the face
+  ctx.fillRect(m, inset, t, size - inset * 2);          // vertical bar
+  ctx.fillRect(inset, m, size - inset * 2, t);          // horizontal bar
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+const healthCrossTexture = makeHealthCrossTexture();
+const healthMat = new THREE.MeshStandardMaterial({
+  map: healthCrossTexture,
+  emissive: 0xffffff,
+  emissiveMap: healthCrossTexture,
+  emissiveIntensity: 0.25,
+  roughness: 0.6,
+});
+
 // --- Seeded RNG (mulberry32) ---
 // Returns a function that yields deterministic floats in [0, 1).
 function makeRng(seed: number): () => number {
@@ -205,6 +240,39 @@ function spawnPylonInChunk(rng: () => number, chunkIndex: number, avoidNearOrigi
   placed.push({ x: pos.x, z: pos.z, radius: collisionRadius });
 }
 
+// --- Health pickups ---
+type HealthPickup = {
+  mesh: THREE.Mesh;
+  x: number;
+  z: number;
+  radius: number;
+  heal: number;
+  bobPhase: number;
+};
+const healthPickups: HealthPickup[] = [];
+
+function spawnHealthInChunk(rng: () => number, chunkIndex: number, avoidNearOrigin: boolean, placed: Placed[], big: boolean) {
+  const size = big ? 1.4 : 0.7;
+  const heal = big ? 8 : 3;
+  const pos = tryPlaceInChunk(rng, chunkIndex, size, avoidNearOrigin, placed);
+  if (!pos) return;
+  const geo = new THREE.BoxGeometry(size, size, size);
+  const mesh = new THREE.Mesh(geo, healthMat);
+  mesh.position.set(pos.x, size / 2 + 0.5, pos.z);
+  mesh.rotation.y = rng() * Math.PI;
+  mesh.castShadow = true;
+  scene.add(mesh);
+  healthPickups.push({
+    mesh, x: pos.x, z: pos.z,
+    radius: size * 0.7,
+    heal,
+    bobPhase: rng() * Math.PI * 2,
+  });
+  // Reserve placement footprint so other chunk items don't overlap, but don't add
+  // to `obstacles` (the player should walk through pickups).
+  placed.push({ x: pos.x, z: pos.z, radius: size * 0.9 });
+}
+
 function generateChunk(chunkIndex: number) {
   if (generatedChunks.has(chunkIndex)) return;
   generatedChunks.add(chunkIndex);
@@ -215,10 +283,15 @@ function generateChunk(chunkIndex: number) {
   const rocks = 2 + Math.floor(rng() * 2);
   const crystals = 1 + Math.floor(rng() * 2);
   const pylons = rng() < 0.6 ? 1 : 0;
+  // Health: small ones common, big ones rare.
+  const smallHealth = rng() < 0.5 ? 1 : 0;
+  const bigHealth = rng() < 0.12 ? 1 : 0;
   const placed: Placed[] = [];
   for (let i = 0; i < rocks; i++) spawnRockInChunk(rng, chunkIndex, avoidNearOrigin, placed);
   for (let i = 0; i < crystals; i++) spawnCrystalInChunk(rng, chunkIndex, avoidNearOrigin, placed);
   for (let i = 0; i < pylons; i++) spawnPylonInChunk(rng, chunkIndex, avoidNearOrigin, placed);
+  for (let i = 0; i < smallHealth; i++) spawnHealthInChunk(rng, chunkIndex, avoidNearOrigin, placed, false);
+  for (let i = 0; i < bigHealth; i++) spawnHealthInChunk(rng, chunkIndex, avoidNearOrigin, placed, true);
 }
 
 function despawnObstacle(o: Obstacle) {
@@ -523,6 +596,17 @@ function streamWorld() {
     }
   }
 
+  // Despawn health pickups outside the keep-band (chunk regen will recreate them).
+  for (let i = healthPickups.length - 1; i >= 0; i--) {
+    const p = healthPickups[i];
+    if (p.z < minZ - CHUNK_LEN || p.z > maxZ + CHUNK_LEN) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      generatedChunks.delete(Math.floor(p.z / CHUNK_LEN));
+      healthPickups.splice(i, 1);
+    }
+  }
+
   // Position ground/wall tiles symmetrically around the player so they're always
   // visible in front and behind, regardless of movement direction.
   // Tile k (k=0,1,...) is centered at: round(pz / TILE_LEN) * TILE_LEN + offset[k]
@@ -587,6 +671,24 @@ function updatePlayerDamageVisuals(dt: number) {
   }
 }
 
+function updateHealthPickups(dt: number) {
+  for (let i = healthPickups.length - 1; i >= 0; i--) {
+    const p = healthPickups[i];
+    p.bobPhase += dt * 1.8;
+    p.mesh.position.y = p.radius + 0.5 + Math.sin(p.bobPhase) * 0.15;
+    p.mesh.rotation.y += dt * 0.8;
+
+    const dx = p.x - playerGroup.position.x;
+    const dz = p.z - playerGroup.position.z;
+    if (dx * dx + dz * dz < (p.radius + playerRadius + 0.2) * (p.radius + playerRadius + 0.2)) {
+      playerHP = Math.min(MAX_HP, playerHP + p.heal);
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      healthPickups.splice(i, 1);
+    }
+  }
+}
+
 function updateMist(dt: number) {
   // Speed grows with distance traveled.
   const speed = MIST_BASE_SPEED + Math.max(0, maxDistance) * MIST_RAMP_PER_METER;
@@ -647,6 +749,11 @@ function restart() {
   bullets.length = 0;
   for (const o of obstacles) despawnObstacle(o);
   obstacles.length = 0;
+  for (const p of healthPickups) {
+    scene.remove(p.mesh);
+    p.mesh.geometry.dispose();
+  }
+  healthPickups.length = 0;
   generatedChunks.clear();
   // New base seed per level — but chunks within the level remain reproducible.
   baseSeed = (Math.random() * 0xffffffff) >>> 0;
@@ -834,6 +941,7 @@ function animate() {
 
     streamWorld();
     updateMist(dt);
+    updateHealthPickups(dt);
     updateEnemySpawning(dt);
     updatePlayerDamageVisuals(dt);
 
