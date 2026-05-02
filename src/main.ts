@@ -273,6 +273,54 @@ function spawnHealthInChunk(rng: () => number, chunkIndex: number, avoidNearOrig
   placed.push({ x: pos.x, z: pos.z, radius: size * 0.9 });
 }
 
+// --- Weapon power-up pickups ---
+type PowerPickup = {
+  mesh: THREE.Mesh;
+  x: number;
+  z: number;
+  radius: number;
+  power: PowerType;
+  bobPhase: number;
+};
+const powerPickups: PowerPickup[] = [];
+const POWER_TYPES: PowerType[] = [
+  'doubleShot', 'tripleShot', 'swirlShot', 'laserRay',
+  'bigGrenade', 'multiGrenade', 'multiExplosion', 'powerShot',
+];
+
+function spawnPowerInChunk(rng: () => number, chunkIndex: number, avoidNearOrigin: boolean, placed: Placed[]) {
+  const size = 1.0;
+  const pos = tryPlaceInChunk(rng, chunkIndex, size, avoidNearOrigin, placed);
+  if (!pos) return;
+  const power = POWER_TYPES[Math.floor(rng() * POWER_TYPES.length)];
+  const info = POWER_INFO[power];
+  const mat = new THREE.MeshStandardMaterial({
+    color: info.color, emissive: info.color, emissiveIntensity: 0.7, roughness: 0.4,
+  });
+  const geo = new THREE.BoxGeometry(size, size, size);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(pos.x, size / 2 + 0.6, pos.z);
+  mesh.rotation.y = rng() * Math.PI;
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  // Small marker ring on top so the player can spot it from afar.
+  const ringGeo = new THREE.TorusGeometry(size * 0.55, 0.06, 6, 16);
+  const ringMat = new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.9, fog: false });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = size * 0.7;
+  mesh.add(ring);
+
+  powerPickups.push({
+    mesh, x: pos.x, z: pos.z,
+    radius: size * 0.7,
+    power,
+    bobPhase: rng() * Math.PI * 2,
+  });
+  placed.push({ x: pos.x, z: pos.z, radius: size * 0.9 });
+}
+
 function generateChunk(chunkIndex: number) {
   if (generatedChunks.has(chunkIndex)) return;
   generatedChunks.add(chunkIndex);
@@ -286,12 +334,14 @@ function generateChunk(chunkIndex: number) {
   // Health: small ones common, big ones rare.
   const smallHealth = rng() < 0.5 ? 1 : 0;
   const bigHealth = rng() < 0.12 ? 1 : 0;
+  const power = rng() < 0.18 ? 1 : 0;
   const placed: Placed[] = [];
   for (let i = 0; i < rocks; i++) spawnRockInChunk(rng, chunkIndex, avoidNearOrigin, placed);
   for (let i = 0; i < crystals; i++) spawnCrystalInChunk(rng, chunkIndex, avoidNearOrigin, placed);
   for (let i = 0; i < pylons; i++) spawnPylonInChunk(rng, chunkIndex, avoidNearOrigin, placed);
   for (let i = 0; i < smallHealth; i++) spawnHealthInChunk(rng, chunkIndex, avoidNearOrigin, placed, false);
   for (let i = 0; i < bigHealth; i++) spawnHealthInChunk(rng, chunkIndex, avoidNearOrigin, placed, true);
+  for (let i = 0; i < power; i++) spawnPowerInChunk(rng, chunkIndex, avoidNearOrigin, placed);
 }
 
 function despawnObstacle(o: Obstacle) {
@@ -447,17 +497,29 @@ window.addEventListener('mouseup', () => { mouseDown = false; });
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // --- Bullets ---
-type Bullet = { mesh: THREE.Mesh; vel: THREE.Vector3; life: number };
+type Bullet = {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  life: number;
+  damage: number;
+  pierce: number;       // remaining pierce-throughs (0 = stop on first hit)
+  hitSet?: Set<unknown>;// for piercing: enemies already hit by this bullet
+  swirl?: { startX: number; startZ: number; fwdX: number; fwdZ: number; t: number; angularSpeed: number; radius: number };
+};
 const bullets: Bullet[] = [];
 const bulletGeo = new THREE.SphereGeometry(0.18, 8, 8);
 const bulletMat = new THREE.MeshStandardMaterial({ color: 0xffee66, emissive: 0xffaa00, emissiveIntensity: 1.2 });
+const powerBulletGeo = new THREE.SphereGeometry(0.32, 12, 10);
+const powerBulletMat = new THREE.MeshStandardMaterial({ color: 0xff66ff, emissive: 0xff22ff, emissiveIntensity: 1.6 });
 const bulletSpeed = 40;
 const bulletLife = 1.5;
 const fireInterval = 0.12;
 let fireCooldown = 0;
 
-function fireBullet(from: THREE.Vector3, dir: THREE.Vector3) {
-  const mesh = new THREE.Mesh(bulletGeo, bulletMat);
+function fireBullet(from: THREE.Vector3, dir: THREE.Vector3, opts: Partial<Bullet> = {}) {
+  const geo = opts.pierce && opts.pierce > 0 ? powerBulletGeo : bulletGeo;
+  const mat = opts.pierce && opts.pierce > 0 ? powerBulletMat : bulletMat;
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.position.copy(from);
   mesh.position.y = 0.9;
   mesh.castShadow = true;
@@ -465,8 +527,161 @@ function fireBullet(from: THREE.Vector3, dir: THREE.Vector3) {
   bullets.push({
     mesh,
     vel: dir.clone().setY(0).normalize().multiplyScalar(bulletSpeed),
-    life: bulletLife,
+    life: opts.life ?? bulletLife,
+    damage: opts.damage ?? 1,
+    pierce: opts.pierce ?? 0,
+    hitSet: opts.pierce ? new Set() : undefined,
+    swirl: opts.swirl,
   });
+}
+
+// --- Power-ups ---
+type PowerType =
+  | 'doubleShot'
+  | 'tripleShot'
+  | 'swirlShot'
+  | 'laserRay'
+  | 'bigGrenade'
+  | 'multiGrenade'
+  | 'multiExplosion'
+  | 'powerShot';
+
+let currentPower: PowerType | null = null;
+
+const POWER_INFO: Record<PowerType, { color: number; label: string }> = {
+  doubleShot:     { color: 0x44ddff, label: 'DOUBLE'  },
+  tripleShot:     { color: 0x66ff88, label: 'TRIPLE'  },
+  swirlShot:      { color: 0xffaa22, label: 'SWIRL'   },
+  laserRay:       { color: 0xff2266, label: 'LASER'   },
+  bigGrenade:     { color: 0xff8800, label: 'BIG GRENADE' },
+  multiGrenade:   { color: 0x88ff44, label: 'MULTI GRENADE' },
+  multiExplosion: { color: 0xff00aa, label: 'MULTI BLAST' },
+  powerShot:      { color: 0xffee00, label: 'POWER SHOT' },
+};
+
+function clearPower() {
+  if (!currentPower) return;
+  currentPower = null;
+  updateHud();
+}
+
+// --- Laser ray (instant beam, used by laserRay power) ---
+type LaserBeam = { line: THREE.Line; mat: THREE.LineBasicMaterial; age: number; duration: number };
+const laserBeams: LaserBeam[] = [];
+function spawnLaserBeam(x1: number, z1: number, x2: number, z2: number) {
+  const mat = new THREE.LineBasicMaterial({ color: 0xff2266, transparent: true, opacity: 1, fog: false });
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x1, 0.9, z1),
+    new THREE.Vector3(x2, 0.9, z2),
+  ]);
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  laserBeams.push({ line, mat, age: 0, duration: 0.18 });
+}
+function updateLaserBeams(dt: number) {
+  for (let i = laserBeams.length - 1; i >= 0; i--) {
+    const lb = laserBeams[i];
+    lb.age += dt;
+    const t = Math.min(1, lb.age / lb.duration);
+    lb.mat.opacity = 1 - t;
+    if (t >= 1) {
+      scene.remove(lb.line);
+      lb.line.geometry.dispose();
+      lb.mat.dispose();
+      laserBeams.splice(i, 1);
+    }
+  }
+}
+
+// Fire weapon based on current power-up.
+function fireWeapon() {
+  const dir = new THREE.Vector3(aimWorld.x - playerGroup.position.x, 0, aimWorld.z - playerGroup.position.z);
+  if (dir.lengthSq() < 0.001) return;
+  dir.setY(0).normalize();
+  const muzzle = new THREE.Vector3(0, 0.95, -1.0).applyEuler(playerGroup.rotation).add(playerGroup.position);
+  // Perpendicular for spreads
+  const perp = new THREE.Vector3(-dir.z, 0, dir.x);
+
+  switch (currentPower) {
+    case 'doubleShot': {
+      const off = 0.4;
+      fireBullet(muzzle.clone().addScaledVector(perp, off), dir);
+      fireBullet(muzzle.clone().addScaledVector(perp, -off), dir);
+      break;
+    }
+    case 'tripleShot': {
+      fireBullet(muzzle, dir);
+      const spread = 0.18; // radians
+      const cs = Math.cos(spread), sn = Math.sin(spread);
+      const left  = new THREE.Vector3(dir.x * cs - dir.z * sn, 0, dir.x * sn + dir.z * cs);
+      const right = new THREE.Vector3(dir.x * cs + dir.z * sn, 0, -dir.x * sn + dir.z * cs);
+      fireBullet(muzzle, left);
+      fireBullet(muzzle, right);
+      break;
+    }
+    case 'swirlShot': {
+      // Two bullets that curl around the aim axis in opposite directions.
+      const swirlA = { startX: muzzle.x, startZ: muzzle.z, fwdX: dir.x, fwdZ: dir.z, t: 0, angularSpeed: 14, radius: 1.4 };
+      const swirlB = { startX: muzzle.x, startZ: muzzle.z, fwdX: dir.x, fwdZ: dir.z, t: 0, angularSpeed: -14, radius: 1.4 };
+      fireBullet(muzzle, dir, { swirl: swirlA, life: 1.8 });
+      fireBullet(muzzle, dir, { swirl: swirlB, life: 1.8 });
+      break;
+    }
+    case 'laserRay': {
+      // Instant ray. March from player along dir, hit first obstacle/wall, damage
+      // every enemy whose body is within `beamHalf` of the line up to the hit point.
+      const startX = playerGroup.position.x;
+      const startZ = playerGroup.position.z;
+      const beamHalf = 0.6;
+      const maxLen = STREAM_AHEAD;
+      // Find end-point: closest obstacle hit, or wall, or maxLen.
+      let endLen = maxLen;
+      // X-walls
+      if (Math.abs(dir.x) > 0.001) {
+        const tx = ((dir.x > 0 ? LANE_HALF : -LANE_HALF) - startX) / dir.x;
+        if (tx > 0 && tx < endLen) endLen = tx;
+      }
+      // Obstacles
+      for (const o of obstacles) {
+        const ox = o.x - startX;
+        const oz = o.z - startZ;
+        const proj = ox * dir.x + oz * dir.z;
+        if (proj < 0 || proj > endLen) continue;
+        const perpDist = Math.abs(ox * dir.z - oz * dir.x);
+        if (perpDist < o.radius + 0.1) endLen = proj;
+      }
+      const endX = startX + dir.x * endLen;
+      const endZ = startZ + dir.z * endLen;
+      // Damage enemies along beam.
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        const ex = e.mesh.position.x - startX;
+        const ez = e.mesh.position.z - startZ;
+        const proj = ex * dir.x + ez * dir.z;
+        if (proj < 0 || proj > endLen) continue;
+        const perpDist = Math.abs(ex * dir.z - ez * dir.x);
+        if (perpDist > beamHalf + e.radius) continue;
+        e.hp -= 2;
+        e.hitFlash = 0.18;
+        if (e.hp <= 0) {
+          scene.remove(e.mesh);
+          (e.mesh.material as THREE.MeshStandardMaterial).dispose();
+          enemies.splice(i, 1);
+          score += e.scoreValue;
+        }
+      }
+      spawnLaserBeam(startX, startZ, endX, endZ);
+      break;
+    }
+    case 'powerShot': {
+      // High damage, pierces up to 4 enemies.
+      fireBullet(muzzle, dir, { damage: 4, pierce: 4, life: 2.0 });
+      break;
+    }
+    default: {
+      fireBullet(muzzle, dir);
+    }
+  }
 }
 
 // --- Grenades ---
@@ -474,6 +689,8 @@ type Grenade = {
   mesh: THREE.Mesh;
   vel: THREE.Vector3;
   fuse: number;     // seconds until detonation
+  big?: boolean;
+  multiExplode?: boolean;
 };
 const grenades: Grenade[] = [];
 const grenadeGeo = new THREE.SphereGeometry(0.22, 12, 10);
@@ -498,6 +715,7 @@ type Explosion = {
   light: THREE.PointLight;
   age: number;
   duration: number;
+  finalScale: number;
 };
 const explosions: Explosion[] = [];
 const explosionGeo = new THREE.SphereGeometry(1, 16, 12);
@@ -505,17 +723,16 @@ const explosionMat = new THREE.MeshBasicMaterial({
   color: 0xffaa33, transparent: true, opacity: 0.9, depthWrite: false, fog: false,
 });
 
-function throwGrenade() {
-  if (grenadeCooldown > 0) return;
-  grenadeCooldown = GRENADE_COOLDOWN;
-
-  // Forward direction from player rotation: gun points along -Z within group,
-  // so the throw direction in world space is (sin(yaw), 0, cos(yaw)) inverted to -Z forward.
-  const yaw = playerGroup.rotation.y;
-  const dirX = -Math.sin(yaw);
-  const dirZ = -Math.cos(yaw);
-
-  const mesh = new THREE.Mesh(grenadeGeo, grenadeMat);
+// Spawn a single grenade with throw kinematics. `dirX/dirZ` is unit forward in XZ.
+// `extra` lets variants override blast/scale/secondary behavior.
+type GrenadeExtra = { big?: boolean; multiExplode?: boolean };
+function spawnGrenade(dirX: number, dirZ: number, extra: GrenadeExtra = {}) {
+  const big = !!extra.big;
+  const scale = big ? 1.8 : 1.0;
+  const geo = big ? new THREE.SphereGeometry(0.22 * scale, 12, 10) : grenadeGeo;
+  const mat = big ? grenadeMat.clone() : grenadeMat;
+  if (big) (mat as THREE.MeshStandardMaterial).color.setHex(0xff8800);
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true;
   mesh.position.set(
     playerGroup.position.x + dirX * 0.7,
@@ -528,37 +745,65 @@ function throwGrenade() {
     mesh,
     vel: new THREE.Vector3(dirX * GRENADE_THROW_SPEED, GRENADE_THROW_UP, dirZ * GRENADE_THROW_SPEED),
     fuse: GRENADE_FUSE,
+    big,
+    multiExplode: !!extra.multiExplode,
   });
 }
 
-function spawnExplosion(x: number, z: number) {
+function throwGrenade() {
+  if (grenadeCooldown > 0) return;
+  grenadeCooldown = GRENADE_COOLDOWN;
+
+  // Forward direction from player rotation.
+  const yaw = playerGroup.rotation.y;
+  const dirX = -Math.sin(yaw);
+  const dirZ = -Math.cos(yaw);
+
+  switch (currentPower) {
+    case 'bigGrenade':
+      spawnGrenade(dirX, dirZ, { big: true });
+      break;
+    case 'multiGrenade': {
+      // Three grenades in a small spread.
+      spawnGrenade(dirX, dirZ);
+      const a = 0.35;
+      const cs = Math.cos(a), sn = Math.sin(a);
+      spawnGrenade(dirX * cs - dirZ * sn, dirX * sn + dirZ * cs);
+      spawnGrenade(dirX * cs + dirZ * sn, -dirX * sn + dirZ * cs);
+      break;
+    }
+    case 'multiExplosion':
+      spawnGrenade(dirX, dirZ, { multiExplode: true });
+      break;
+    default:
+      spawnGrenade(dirX, dirZ);
+  }
+}
+
+function spawnExplosion(x: number, z: number, scale = 1) {
   const mat = explosionMat.clone();
   const mesh = new THREE.Mesh(explosionGeo, mat);
   mesh.position.set(x, 0.6, z);
-  mesh.scale.setScalar(0.5);
+  mesh.scale.setScalar(0.5 * scale);
   scene.add(mesh);
 
-  const light = new THREE.PointLight(0xffaa33, 8, GRENADE_RADIUS * 2.5, 2);
+  const light = new THREE.PointLight(0xffaa33, 8 * scale, GRENADE_RADIUS * 2.5 * scale, 2);
   light.position.set(x, 1.5, z);
   scene.add(light);
 
-  explosions.push({ mesh, light, age: 0, duration: 0.45 });
+  explosions.push({ mesh, light, age: 0, duration: 0.45, finalScale: GRENADE_RADIUS * scale });
 }
 
-function detonateGrenade(g: Grenade) {
-  const x = g.mesh.position.x;
-  const z = g.mesh.position.z;
-  spawnExplosion(x, z);
-
-  // Damage enemies in radius (linear falloff, min 1 dmg).
+function explodeAt(x: number, z: number, radius: number, damage: number, selfDamageCap: number) {
+  spawnExplosion(x, z, radius / GRENADE_RADIUS);
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     const dx = e.mesh.position.x - x;
     const dz = e.mesh.position.z - z;
     const d = Math.hypot(dx, dz);
-    if (d > GRENADE_RADIUS + e.radius) continue;
-    const falloff = Math.max(0, 1 - d / GRENADE_RADIUS);
-    const dmg = Math.max(1, Math.round(GRENADE_DAMAGE * falloff));
+    if (d > radius + e.radius) continue;
+    const falloff = Math.max(0, 1 - d / radius);
+    const dmg = Math.max(1, Math.round(damage * falloff));
     e.hp -= dmg;
     e.hitFlash = 0.18;
     if (e.hp <= 0) {
@@ -568,15 +813,31 @@ function detonateGrenade(g: Grenade) {
       score += e.scoreValue;
     }
   }
-
-  // Self-damage if player is in the blast (small).
   const pdx = playerGroup.position.x - x;
   const pdz = playerGroup.position.z - z;
   const pd = Math.hypot(pdx, pdz);
-  if (pd < GRENADE_RADIUS) {
-    const falloff = 1 - pd / GRENADE_RADIUS;
-    const dmg = Math.max(1, Math.round(3 * falloff));
+  if (pd < radius) {
+    const falloff = 1 - pd / radius;
+    const dmg = Math.max(1, Math.round(selfDamageCap * falloff));
     damagePlayer(dmg);
+  }
+}
+
+function detonateGrenade(g: Grenade) {
+  const x = g.mesh.position.x;
+  const z = g.mesh.position.z;
+  if (g.big) {
+    explodeAt(x, z, GRENADE_RADIUS * 1.7, GRENADE_DAMAGE * 1.6, 4);
+  } else if (g.multiExplode) {
+    // Primary blast plus four secondaries spread around it.
+    explodeAt(x, z, GRENADE_RADIUS, GRENADE_DAMAGE, 3);
+    const r = 4;
+    const seeds = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
+    for (const a of seeds) {
+      explodeAt(x + Math.cos(a) * r, z + Math.sin(a) * r, GRENADE_RADIUS * 0.7, GRENADE_DAMAGE * 0.7, 2);
+    }
+  } else {
+    explodeAt(x, z, GRENADE_RADIUS, GRENADE_DAMAGE, 3);
   }
 }
 
@@ -658,7 +919,7 @@ function updateGrenades(dt: number) {
     const ex = explosions[i];
     ex.age += dt;
     const t = Math.min(1, ex.age / ex.duration);
-    const scale = 0.5 + t * GRENADE_RADIUS;
+    const scale = 0.5 + t * ex.finalScale;
     ex.mesh.scale.setScalar(scale);
     (ex.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9 * (1 - t);
     ex.light.intensity = 8 * (1 - t);
@@ -813,6 +1074,23 @@ function streamWorld() {
       healthPickups.splice(i, 1);
     }
   }
+  // Despawn power pickups outside the keep-band.
+  for (let i = powerPickups.length - 1; i >= 0; i--) {
+    const p = powerPickups[i];
+    if (p.z < minZ - CHUNK_LEN || p.z > maxZ + CHUNK_LEN) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      (p.mesh.material as THREE.MeshStandardMaterial).dispose();
+      for (const child of p.mesh.children) {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          (child.material as THREE.MeshBasicMaterial).dispose();
+        }
+      }
+      generatedChunks.delete(Math.floor(p.z / CHUNK_LEN));
+      powerPickups.splice(i, 1);
+    }
+  }
 
   // Position ground/wall tiles symmetrically around the player so they're always
   // visible in front and behind, regardless of movement direction.
@@ -909,6 +1187,33 @@ function updateHealthPickups(dt: number) {
   }
 }
 
+function updatePowerPickups(dt: number) {
+  for (let i = powerPickups.length - 1; i >= 0; i--) {
+    const p = powerPickups[i];
+    p.bobPhase += dt * 1.6;
+    p.mesh.position.y = p.radius + 0.6 + Math.sin(p.bobPhase) * 0.2;
+    p.mesh.rotation.y += dt * 1.2;
+
+    const dx = p.x - playerGroup.position.x;
+    const dz = p.z - playerGroup.position.z;
+    if (dx * dx + dz * dz < (p.radius + playerRadius + 0.2) * (p.radius + playerRadius + 0.2)) {
+      currentPower = p.power;
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      (p.mesh.material as THREE.MeshStandardMaterial).dispose();
+      // Dispose ring child too.
+      for (const child of p.mesh.children) {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          (child.material as THREE.MeshBasicMaterial).dispose();
+        }
+      }
+      powerPickups.splice(i, 1);
+      updateHud();
+    }
+  }
+}
+
 function updateMist(dt: number) {
   // Speed grows with distance traveled.
   const speed = MIST_BASE_SPEED + Math.max(0, maxDistance) * MIST_RAMP_PER_METER;
@@ -950,11 +1255,20 @@ function updateEnemySpawning(dt: number) {
 const hpEl = document.getElementById('hp')!;
 const scoreEl = document.getElementById('score')!;
 const distEl = document.getElementById('wave')!; // reuse existing element
+const powerEl = document.getElementById('power')!;
 const overlayEl = document.getElementById('overlay')!;
 function updateHud() {
   hpEl.textContent = `HP: ${playerHP}`;
   scoreEl.textContent = `Score: ${score}`;
   distEl.textContent = `Distance: ${Math.floor(maxDistance)}m`;
+  if (currentPower) {
+    const info = POWER_INFO[currentPower];
+    powerEl.textContent = `Power: ${info.label}`;
+    powerEl.style.color = '#' + info.color.toString(16).padStart(6, '0');
+    powerEl.style.display = 'block';
+  } else {
+    powerEl.style.display = 'none';
+  }
 }
 updateHud();
 
@@ -974,6 +1288,25 @@ function restart() {
     p.mesh.geometry.dispose();
   }
   healthPickups.length = 0;
+  for (const p of powerPickups) {
+    scene.remove(p.mesh);
+    p.mesh.geometry.dispose();
+    (p.mesh.material as THREE.MeshStandardMaterial).dispose();
+    for (const child of p.mesh.children) {
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        (child.material as THREE.MeshBasicMaterial).dispose();
+      }
+    }
+  }
+  powerPickups.length = 0;
+  for (const lb of laserBeams) {
+    scene.remove(lb.line);
+    lb.line.geometry.dispose();
+    lb.mat.dispose();
+  }
+  laserBeams.length = 0;
+  currentPower = null;
   for (const g of grenades) scene.remove(g.mesh);
   grenades.length = 0;
   for (const ex of explosions) {
@@ -1100,37 +1433,52 @@ function animate() {
     // --- Shoot
     fireCooldown -= dt;
     if (mouseDown && fireCooldown <= 0) {
-      const dir = new THREE.Vector3(aimWorld.x - playerGroup.position.x, 0, aimWorld.z - playerGroup.position.z);
-      if (dir.lengthSq() > 0.001) {
-        const muzzle = new THREE.Vector3(0, 0.95, -1.0).applyEuler(playerGroup.rotation).add(playerGroup.position);
-        fireBullet(muzzle, dir);
-        fireCooldown = fireInterval;
-      }
+      fireWeapon();
+      fireCooldown = currentPower === 'laserRay' ? 0.4
+        : currentPower === 'powerShot' ? 0.25
+        : fireInterval;
     }
 
     // --- Bullets
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
-      b.mesh.position.x += b.vel.x * dt;
-      b.mesh.position.z += b.vel.z * dt;
+      // Swirl: parametric path = start + forward·speed·t + perp·sin(ωt)·radius.
+      if (b.swirl) {
+        const sw = b.swirl;
+        sw.t += dt;
+        const px = -sw.fwdZ; // perpendicular in XZ
+        const pz = sw.fwdX;
+        const wobble = Math.sin(sw.t * sw.angularSpeed) * sw.radius;
+        b.mesh.position.x = sw.startX + sw.fwdX * bulletSpeed * 0.5 * sw.t + px * wobble;
+        b.mesh.position.z = sw.startZ + sw.fwdZ * bulletSpeed * 0.5 * sw.t + pz * wobble;
+      } else {
+        b.mesh.position.x += b.vel.x * dt;
+        b.mesh.position.z += b.vel.z * dt;
+      }
       b.life -= dt;
 
       let hit = false;
       for (let j = enemies.length - 1; j >= 0; j--) {
         const e = enemies[j];
+        if (b.hitSet && b.hitSet.has(e)) continue;
         const dx = b.mesh.position.x - e.mesh.position.x;
         const dz = b.mesh.position.z - e.mesh.position.z;
         if (dx * dx + dz * dz < (e.radius + 0.18) * (e.radius + 0.18)) {
-          e.hp -= 1;
+          e.hp -= b.damage;
           e.hitFlash = 0.12;
-          hit = true;
+          if (b.pierce > 0 && b.hitSet) {
+            b.hitSet.add(e);
+            b.pierce -= 1;
+          } else {
+            hit = true;
+          }
           if (e.hp <= 0) {
             scene.remove(e.mesh);
             (e.mesh.material as THREE.MeshStandardMaterial).dispose();
             enemies.splice(j, 1);
             score += e.scoreValue;
           }
-          break;
+          if (hit) break;
         }
       }
 
@@ -1166,13 +1514,16 @@ function animate() {
         e.mesh.position.x -= (dx / dist) * 2;
         e.mesh.position.z -= (dz / dist) * 2;
         damagePlayer(1);
+        clearPower();
       }
     }
 
     streamWorld();
     updateMist(dt);
     updateHealthPickups(dt);
+    updatePowerPickups(dt);
     updateGrenades(dt);
+    updateLaserBeams(dt);
     updateEnemySpawning(dt);
     updatePlayerDamageVisuals(dt);
 
