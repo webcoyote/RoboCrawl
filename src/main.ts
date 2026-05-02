@@ -412,9 +412,11 @@ let paused = false;
 // --- Input ---
 const keys: Record<string, boolean> = {};
 window.addEventListener('keydown', (e) => {
+  const wasDown = keys[e.code];
   keys[e.code] = true;
   if (gameOver && e.code === 'Enter') restart();
   else if (e.code === 'Escape' && !gameOver) togglePause();
+  else if (e.code === 'KeyE' && !wasDown && !gameOver && !paused) throwGrenade();
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
@@ -465,6 +467,173 @@ function fireBullet(from: THREE.Vector3, dir: THREE.Vector3) {
     vel: dir.clone().setY(0).normalize().multiplyScalar(bulletSpeed),
     life: bulletLife,
   });
+}
+
+// --- Grenades ---
+type Grenade = {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  fuse: number;     // seconds until detonation
+};
+const grenades: Grenade[] = [];
+const grenadeGeo = new THREE.SphereGeometry(0.22, 12, 10);
+const grenadeMat = new THREE.MeshStandardMaterial({
+  color: 0x224422, emissive: 0x113311, emissiveIntensity: 0.4, roughness: 0.6,
+});
+const GRENADE_FUSE = 1.4;
+const GRENADE_THROW_SPEED = 12;
+const GRENADE_THROW_UP = 9;
+const GRENADE_GRAVITY = -22;
+const GRENADE_BOUNCE = 0.4;
+const GRENADE_GROUND_FRICTION = 0.7;
+const GRENADE_RADIUS = 6;
+const GRENADE_DAMAGE = 6; // damage applied at center; falls off with distance
+
+const GRENADE_COOLDOWN = 0.6;
+let grenadeCooldown = 0;
+
+// Explosion visuals
+type Explosion = {
+  mesh: THREE.Mesh;
+  light: THREE.PointLight;
+  age: number;
+  duration: number;
+};
+const explosions: Explosion[] = [];
+const explosionGeo = new THREE.SphereGeometry(1, 16, 12);
+const explosionMat = new THREE.MeshBasicMaterial({
+  color: 0xffaa33, transparent: true, opacity: 0.9, depthWrite: false, fog: false,
+});
+
+function throwGrenade() {
+  if (grenadeCooldown > 0) return;
+  grenadeCooldown = GRENADE_COOLDOWN;
+
+  // Forward direction from player rotation: gun points along -Z within group,
+  // so the throw direction in world space is (sin(yaw), 0, cos(yaw)) inverted to -Z forward.
+  const yaw = playerGroup.rotation.y;
+  const dirX = -Math.sin(yaw);
+  const dirZ = -Math.cos(yaw);
+
+  const mesh = new THREE.Mesh(grenadeGeo, grenadeMat);
+  mesh.castShadow = true;
+  mesh.position.set(
+    playerGroup.position.x + dirX * 0.7,
+    1.0,
+    playerGroup.position.z + dirZ * 0.7,
+  );
+  scene.add(mesh);
+
+  grenades.push({
+    mesh,
+    vel: new THREE.Vector3(dirX * GRENADE_THROW_SPEED, GRENADE_THROW_UP, dirZ * GRENADE_THROW_SPEED),
+    fuse: GRENADE_FUSE,
+  });
+}
+
+function spawnExplosion(x: number, z: number) {
+  const mat = explosionMat.clone();
+  const mesh = new THREE.Mesh(explosionGeo, mat);
+  mesh.position.set(x, 0.6, z);
+  mesh.scale.setScalar(0.5);
+  scene.add(mesh);
+
+  const light = new THREE.PointLight(0xffaa33, 8, GRENADE_RADIUS * 2.5, 2);
+  light.position.set(x, 1.5, z);
+  scene.add(light);
+
+  explosions.push({ mesh, light, age: 0, duration: 0.45 });
+}
+
+function detonateGrenade(g: Grenade) {
+  const x = g.mesh.position.x;
+  const z = g.mesh.position.z;
+  spawnExplosion(x, z);
+
+  // Damage enemies in radius (linear falloff, min 1 dmg).
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    const dx = e.mesh.position.x - x;
+    const dz = e.mesh.position.z - z;
+    const d = Math.hypot(dx, dz);
+    if (d > GRENADE_RADIUS + e.radius) continue;
+    const falloff = Math.max(0, 1 - d / GRENADE_RADIUS);
+    const dmg = Math.max(1, Math.round(GRENADE_DAMAGE * falloff));
+    e.hp -= dmg;
+    e.hitFlash = 0.18;
+    if (e.hp <= 0) {
+      scene.remove(e.mesh);
+      (e.mesh.material as THREE.MeshStandardMaterial).dispose();
+      enemies.splice(i, 1);
+      score += e.scoreValue;
+    }
+  }
+
+  // Self-damage if player is in the blast (small).
+  const pdx = playerGroup.position.x - x;
+  const pdz = playerGroup.position.z - z;
+  const pd = Math.hypot(pdx, pdz);
+  if (pd < GRENADE_RADIUS) {
+    const falloff = 1 - pd / GRENADE_RADIUS;
+    const dmg = Math.max(1, Math.round(3 * falloff));
+    damagePlayer(dmg);
+  }
+}
+
+function updateGrenades(dt: number) {
+  if (grenadeCooldown > 0) grenadeCooldown -= dt;
+
+  for (let i = grenades.length - 1; i >= 0; i--) {
+    const g = grenades[i];
+    g.fuse -= dt;
+
+    // Integrate.
+    g.vel.y += GRENADE_GRAVITY * dt;
+    g.mesh.position.x += g.vel.x * dt;
+    g.mesh.position.y += g.vel.y * dt;
+    g.mesh.position.z += g.vel.z * dt;
+
+    // Ground bounce.
+    const groundY = 0.22;
+    if (g.mesh.position.y < groundY) {
+      g.mesh.position.y = groundY;
+      g.vel.y = -g.vel.y * GRENADE_BOUNCE;
+      g.vel.x *= GRENADE_GROUND_FRICTION;
+      g.vel.z *= GRENADE_GROUND_FRICTION;
+      if (Math.abs(g.vel.y) < 0.4) g.vel.y = 0;
+    }
+
+    // Side wall clamp on X.
+    const limit = LANE_HALF - 0.5;
+    if (g.mesh.position.x > limit) { g.mesh.position.x = limit; g.vel.x = -g.vel.x * GRENADE_BOUNCE; }
+    if (g.mesh.position.x < -limit) { g.mesh.position.x = -limit; g.vel.x = -g.vel.x * GRENADE_BOUNCE; }
+
+    // Tumble visually.
+    g.mesh.rotation.x += dt * 6;
+    g.mesh.rotation.z += dt * 4;
+
+    if (g.fuse <= 0) {
+      detonateGrenade(g);
+      scene.remove(g.mesh);
+      grenades.splice(i, 1);
+    }
+  }
+
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    const ex = explosions[i];
+    ex.age += dt;
+    const t = Math.min(1, ex.age / ex.duration);
+    const scale = 0.5 + t * GRENADE_RADIUS;
+    ex.mesh.scale.setScalar(scale);
+    (ex.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9 * (1 - t);
+    ex.light.intensity = 8 * (1 - t);
+    if (t >= 1) {
+      scene.remove(ex.mesh);
+      (ex.mesh.material as THREE.MeshBasicMaterial).dispose();
+      scene.remove(ex.light);
+      explosions.splice(i, 1);
+    }
+  }
 }
 
 // --- Enemies ---
@@ -770,6 +939,15 @@ function restart() {
     p.mesh.geometry.dispose();
   }
   healthPickups.length = 0;
+  for (const g of grenades) scene.remove(g.mesh);
+  grenades.length = 0;
+  for (const ex of explosions) {
+    scene.remove(ex.mesh);
+    (ex.mesh.material as THREE.MeshBasicMaterial).dispose();
+    scene.remove(ex.light);
+  }
+  explosions.length = 0;
+  grenadeCooldown = 0;
   generatedChunks.clear();
   // New base seed per level — but chunks within the level remain reproducible.
   baseSeed = (Math.random() * 0xffffffff) >>> 0;
@@ -959,6 +1137,7 @@ function animate() {
     streamWorld();
     updateMist(dt);
     updateHealthPickups(dt);
+    updateGrenades(dt);
     updateEnemySpawning(dt);
     updatePlayerDamageVisuals(dt);
 
