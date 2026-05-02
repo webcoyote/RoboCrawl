@@ -1,6 +1,10 @@
-# RoboCrawl
+# RoboCrawl - a morning project
 
 A browser-based, top-down arcade shooter built with [Three.js](https://threejs.org/) and TypeScript. You crawl forward through an endless corridor, dodging obstacles and gunning down whatever comes at you.
+
+![Robocrawl](./robocrawl.webp)
+
+![Menu](./cheatmenu.webp)
 
 ## Controls
 
@@ -11,6 +15,7 @@ A browser-based, top-down arcade shooter built with [Three.js](https://threejs.o
 | Click / hold | Shoot |
 | `E` | Throw grenade |
 | `ESC` | Pause / resume (opens cheat menu) |
+| `P` | Pause / resume (no menu) |
 
 ## Running
 

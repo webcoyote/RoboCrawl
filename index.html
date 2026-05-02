@@ -124,6 +124,22 @@
       pointer-events: none;
       display: none;
     }
+    #pauseNote {
+      position: fixed;
+      top: 50%;
+      right: 16px;
+      transform: translateY(-50%);
+      color: #aad8ff;
+      font-family: monospace;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      padding: 6px 10px;
+      background: rgba(8, 12, 20, 0.7);
+      border: 1px solid rgba(120, 180, 220, 0.4);
+      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+      pointer-events: none;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -132,6 +148,7 @@
     <div>MOUSE to aim &middot; CLICK / HOLD to shoot</div>
     <div>E to throw grenade</div>
     <div>ESC to pause/resume</div>
+    <div>P for screenshot pause</div>
   </div>
   <div id="stats">
     <div id="hp">HP: 25</div>
@@ -142,6 +159,7 @@
   </div>
   <div id="damageFlash"></div>
   <div id="pauseTitle">RoboCrawl</div>
+  <div id="pauseNote">PAUSED &middot; press P to resume</div>
   <div id="overlay"></div>
   <div id="cheatMenu">
     <h2>CHEAT MENU</h2>

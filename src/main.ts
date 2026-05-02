@@ -522,18 +522,44 @@ window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (gameOver && e.code === 'Enter') restart();
   else if (e.code === 'Escape' && !gameOver) togglePause();
+  else if (e.code === 'KeyP' && !wasDown && !gameOver) toggleScreenshotPause();
   else if (paused && handleCheatKey(e.code)) { /* handled */ }
   else if (e.code === 'KeyE' && !wasDown && !gameOver && !paused) throwGrenade();
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
+let screenshotPause = false;
+const pauseNoteEl = document.getElementById('pauseNote')!;
+
 function togglePause() {
+  if (screenshotPause) endScreenshotPause();
   paused = !paused;
   if (paused) {
     showCheatMenu();
   } else {
     hideCheatMenu();
   }
+}
+
+function toggleScreenshotPause() {
+  if (paused && !screenshotPause) {
+    togglePause();
+    return;
+  }
+  if (screenshotPause) endScreenshotPause();
+  else beginScreenshotPause();
+}
+
+function beginScreenshotPause() {
+  screenshotPause = true;
+  paused = true;
+  pauseNoteEl.style.display = 'block';
+}
+
+function endScreenshotPause() {
+  screenshotPause = false;
+  paused = false;
+  pauseNoteEl.style.display = 'none';
 }
 
 // Mouse aim
