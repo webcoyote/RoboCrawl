@@ -54,6 +54,61 @@
         rgba(255, 0, 0, 0.55) 95%);
       transition: opacity 0.18s ease-out;
     }
+    #cheatMenu {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-family: monospace;
+      font-size: 16px;
+      background: rgba(8, 12, 20, 0.92);
+      border: 1px solid rgba(120, 180, 220, 0.5);
+      padding: 18px 22px;
+      min-width: 280px;
+      box-shadow: 0 0 24px rgba(0, 0, 0, 0.8);
+      display: none;
+    }
+    #cheatMenu h2 {
+      font-size: 18px;
+      margin-bottom: 12px;
+      letter-spacing: 0.1em;
+      color: #aad8ff;
+    }
+    #cheatMenu ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    #cheatMenu li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 8px;
+      cursor: pointer;
+      border-radius: 3px;
+    }
+    #cheatMenu li:hover { background: rgba(80, 140, 200, 0.18); }
+    #cheatMenu li.selected { background: rgba(80, 140, 200, 0.35); }
+    #cheatMenu .key {
+      display: inline-block;
+      width: 22px;
+      text-align: center;
+      color: #88aacc;
+    }
+    #cheatMenu .label { flex: 1; }
+    #cheatMenu .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 2px;
+      margin-left: 10px;
+    }
+    #cheatMenu .hint {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #889;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -71,6 +126,11 @@
   </div>
   <div id="damageFlash"></div>
   <div id="overlay"></div>
+  <div id="cheatMenu">
+    <h2>CHEAT MENU</h2>
+    <ol id="cheatList"></ol>
+    <div class="hint">Press number key, click row, or 0 to clear · ESC to resume</div>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

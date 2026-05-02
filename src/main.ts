@@ -466,6 +466,7 @@ window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (gameOver && e.code === 'Enter') restart();
   else if (e.code === 'Escape' && !gameOver) togglePause();
+  else if (paused && handleCheatKey(e.code)) { /* handled */ }
   else if (e.code === 'KeyE' && !wasDown && !gameOver && !paused) throwGrenade();
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
@@ -473,10 +474,9 @@ window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 function togglePause() {
   paused = !paused;
   if (paused) {
-    overlayEl.innerHTML = `PAUSED<br><span style="font-size:18px">Press ESC to resume</span>`;
-    overlayEl.style.display = 'block';
+    showCheatMenu();
   } else {
-    overlayEl.style.display = 'none';
+    hideCheatMenu();
   }
 }
 
@@ -563,6 +563,72 @@ function clearPower() {
   if (!currentPower) return;
   currentPower = null;
   updateHud();
+}
+
+// --- Cheat menu (visible while paused) ---
+const cheatMenuEl = document.getElementById('cheatMenu')!;
+const cheatListEl = document.getElementById('cheatList')!;
+
+function buildCheatMenu() {
+  cheatListEl.innerHTML = '';
+  POWER_TYPES.forEach((power, i) => {
+    const info = POWER_INFO[power];
+    const li = document.createElement('li');
+    li.dataset.power = power;
+    li.innerHTML =
+      `<span class="key">${i + 1}</span>` +
+      `<span class="label">${info.label}</span>` +
+      `<span class="swatch" style="background:#${info.color.toString(16).padStart(6, '0')}"></span>`;
+    li.addEventListener('click', () => selectCheatPower(power));
+    cheatListEl.appendChild(li);
+  });
+  // Extra row to clear the active power.
+  const clearLi = document.createElement('li');
+  clearLi.dataset.power = '';
+  clearLi.innerHTML = `<span class="key">0</span><span class="label">— None —</span><span class="swatch" style="background:#222"></span>`;
+  clearLi.addEventListener('click', () => selectCheatPower(null));
+  cheatListEl.appendChild(clearLi);
+}
+buildCheatMenu();
+
+function refreshCheatMenuSelection() {
+  const items = cheatListEl.querySelectorAll('li');
+  items.forEach((li) => {
+    const p = (li as HTMLLIElement).dataset.power || null;
+    li.classList.toggle('selected', p === (currentPower ?? ''));
+  });
+}
+
+function showCheatMenu() {
+  refreshCheatMenuSelection();
+  cheatMenuEl.style.display = 'block';
+}
+function hideCheatMenu() {
+  cheatMenuEl.style.display = 'none';
+}
+
+function selectCheatPower(power: PowerType | null) {
+  currentPower = power;
+  refreshCheatMenuSelection();
+  updateHud();
+}
+
+// Returns true if the key was consumed by the cheat menu.
+function handleCheatKey(code: string): boolean {
+  if (code === 'Digit0') {
+    selectCheatPower(null);
+    return true;
+  }
+  // Digit1..Digit9 → POWER_TYPES[0..8]
+  const m = /^Digit([1-9])$/.exec(code);
+  if (m) {
+    const idx = parseInt(m[1], 10) - 1;
+    if (idx >= 0 && idx < POWER_TYPES.length) {
+      selectCheatPower(POWER_TYPES[idx]);
+      return true;
+    }
+  }
+  return false;
 }
 
 // --- Laser ray (instant beam, used by laserRay power) ---
