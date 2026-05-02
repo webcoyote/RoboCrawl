@@ -566,28 +566,94 @@ function clearPower() {
 }
 
 // --- Laser ray (instant beam, used by laserRay power) ---
-type LaserBeam = { line: THREE.Line; mat: THREE.LineBasicMaterial; age: number; duration: number };
+type LaserBeam = {
+  group: THREE.Group;
+  core: THREE.Mesh;
+  glow: THREE.Mesh;
+  outer: THREE.Mesh;
+  startLight: THREE.PointLight;
+  endLight: THREE.PointLight;
+  age: number;
+  duration: number;
+};
 const laserBeams: LaserBeam[] = [];
 function spawnLaserBeam(x1: number, z1: number, x2: number, z2: number) {
-  const mat = new THREE.LineBasicMaterial({ color: 0xff2266, transparent: true, opacity: 1, fog: false });
-  const geo = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(x1, 0.9, z1),
-    new THREE.Vector3(x2, 0.9, z2),
-  ]);
-  const line = new THREE.Line(geo, mat);
-  scene.add(line);
-  laserBeams.push({ line, mat, age: 0, duration: 0.18 });
+  const length = Math.hypot(x2 - x1, z2 - z1);
+  if (length < 0.01) return;
+
+  const group = new THREE.Group();
+
+  // Three concentric cylinders: bright core, mid glow, soft outer halo.
+  // Cylinder default axis is Y; we orient the group along the beam direction.
+  const core = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.18, 0.18, length, 12, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, fog: false, depthWrite: false }),
+  );
+  const glow = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.5, 0.5, length, 16, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xff3366, transparent: true, opacity: 0.85, fog: false, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  const outer = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.1, 1.1, length, 20, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xff0044, transparent: true, opacity: 0.35, fog: false, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  // Geometry runs +Y; translate so its base is at origin (we'll rotate from origin).
+  core.geometry.translate(0, length / 2, 0);
+  glow.geometry.translate(0, length / 2, 0);
+  outer.geometry.translate(0, length / 2, 0);
+
+  group.add(outer);
+  group.add(glow);
+  group.add(core);
+
+  // Position group at start, then orient its +Y to point along (dx, 0, dz).
+  group.position.set(x1, 0.9, z1);
+  const dir = new THREE.Vector3(x2 - x1, 0, z2 - z1).normalize();
+  group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  scene.add(group);
+
+  // Bright lights at the muzzle and impact point.
+  const startLight = new THREE.PointLight(0xff3366, 12, 14, 2);
+  startLight.position.set(x1, 1.2, z1);
+  scene.add(startLight);
+  const endLight = new THREE.PointLight(0xff5599, 18, 18, 2);
+  endLight.position.set(x2, 1.0, z2);
+  scene.add(endLight);
+
+  laserBeams.push({
+    group,
+    core, glow, outer,
+    startLight, endLight,
+    age: 0, duration: 0.32,
+  });
 }
 function updateLaserBeams(dt: number) {
   for (let i = laserBeams.length - 1; i >= 0; i--) {
     const lb = laserBeams[i];
     lb.age += dt;
     const t = Math.min(1, lb.age / lb.duration);
-    lb.mat.opacity = 1 - t;
+    // Keep core hot for the first 60%, then fade everything out fast.
+    const coreFade = t < 0.6 ? 1 : Math.max(0, 1 - (t - 0.6) / 0.4);
+    const glowFade = 1 - t;
+    (lb.core.material as THREE.MeshBasicMaterial).opacity = coreFade;
+    (lb.glow.material as THREE.MeshBasicMaterial).opacity = 0.85 * glowFade;
+    (lb.outer.material as THREE.MeshBasicMaterial).opacity = 0.35 * glowFade;
+    // Subtle thickness pulse so it feels alive.
+    const pulse = 1 + Math.sin(lb.age * 60) * 0.06;
+    lb.outer.scale.set(pulse, 1, pulse);
+    lb.glow.scale.set(pulse, 1, pulse);
+    lb.startLight.intensity = 12 * (1 - t);
+    lb.endLight.intensity = 18 * (1 - t);
     if (t >= 1) {
-      scene.remove(lb.line);
-      lb.line.geometry.dispose();
-      lb.mat.dispose();
+      scene.remove(lb.group);
+      lb.core.geometry.dispose();
+      lb.glow.geometry.dispose();
+      lb.outer.geometry.dispose();
+      (lb.core.material as THREE.MeshBasicMaterial).dispose();
+      (lb.glow.material as THREE.MeshBasicMaterial).dispose();
+      (lb.outer.material as THREE.MeshBasicMaterial).dispose();
+      scene.remove(lb.startLight);
+      scene.remove(lb.endLight);
       laserBeams.splice(i, 1);
     }
   }
@@ -632,7 +698,7 @@ function fireWeapon() {
       // every enemy whose body is within `beamHalf` of the line up to the hit point.
       const startX = playerGroup.position.x;
       const startZ = playerGroup.position.z;
-      const beamHalf = 0.6;
+      const beamHalf = 0.9;
       const maxLen = STREAM_AHEAD;
       // Find end-point: closest obstacle hit, or wall, or maxLen.
       let endLen = maxLen;
@@ -661,8 +727,8 @@ function fireWeapon() {
         if (proj < 0 || proj > endLen) continue;
         const perpDist = Math.abs(ex * dir.z - ez * dir.x);
         if (perpDist > beamHalf + e.radius) continue;
-        e.hp -= 2;
-        e.hitFlash = 0.18;
+        e.hp -= 8;
+        e.hitFlash = 0.22;
         if (e.hp <= 0) {
           scene.remove(e.mesh);
           (e.mesh.material as THREE.MeshStandardMaterial).dispose();
@@ -1301,9 +1367,15 @@ function restart() {
   }
   powerPickups.length = 0;
   for (const lb of laserBeams) {
-    scene.remove(lb.line);
-    lb.line.geometry.dispose();
-    lb.mat.dispose();
+    scene.remove(lb.group);
+    lb.core.geometry.dispose();
+    lb.glow.geometry.dispose();
+    lb.outer.geometry.dispose();
+    (lb.core.material as THREE.MeshBasicMaterial).dispose();
+    (lb.glow.material as THREE.MeshBasicMaterial).dispose();
+    (lb.outer.material as THREE.MeshBasicMaterial).dispose();
+    scene.remove(lb.startLight);
+    scene.remove(lb.endLight);
   }
   laserBeams.length = 0;
   currentPower = null;
