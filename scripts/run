@@ -4,4 +4,22 @@ trap 'echo "${BASH_SOURCE[0]}: line $LINENO: $BASH_COMMAND: exitcode $?"' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-pnpm run dev "$@"
+# Run app, tee output so we can detect the URL it prints, then open the browser
+LOG=$(mktemp 2>/dev/null || mktemp -t robocrawl)
+trap 'rm -f "$LOG"' EXIT
+
+pnpm run dev "$@" 2>&1 | tee "$LOG" &
+PID=$!
+
+(
+  # Watch the log for the "Local:" URL Vite prints, then open it.
+  url=""
+  for _ in $(seq 1 100); do
+    url=$(grep -oE 'http://localhost:[0-9]+' "$LOG" | head -n1 || true)
+    [[ -n "$url" ]] && break
+    sleep 0.1
+  done
+  [[ -n "$url" ]] && "$SCRIPT_DIR/open" "$url"
+) &
+
+wait "$PID"

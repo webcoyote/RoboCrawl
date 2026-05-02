@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+case "$OSTYPE" in
+    linux*)
+        exec xdg-open "$@"
+    ;;
+
+    darwin*)
+        exec /usr/bin/open "$@"
+    ;;
+
+    msys*|cygwin*|win32)
+        # `start` is a cmd.exe builtin, not an executable; invoke via cmd.
+        # The empty "" is the window title argument that `start` requires
+        # when its first argument is quoted.
+        exec cmd.exe //c start "" "$@"
+    ;;
+
+    *)
+        echo >&2 "ERROR: unknown OS: $OSTYPE"
+        exit 1
+    ;;
+esac

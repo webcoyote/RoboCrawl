@@ -5,7 +5,56 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 echo >&2 "Installing build tools ..."
+
+# Tools we want available. direnv is optional but used by .envrc.
 TOOLS=(direnv pnpm)
+
+install_tool() {
+  local tool=$1
+  case "$OSTYPE" in
+    darwin*)
+      if command -v brew &>/dev/null; then
+        brew install "$tool"
+        return
+      fi
+      ;;
+    linux*)
+      if command -v apt-get &>/dev/null; then
+        sudo apt-get update && sudo apt-get install -y "$tool"
+        return
+      elif command -v dnf &>/dev/null; then
+        sudo dnf install -y "$tool"
+        return
+      elif command -v yum &>/dev/null; then
+        sudo yum install -y "$tool"
+        return
+      elif command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm "$tool"
+        return
+      elif command -v zypper &>/dev/null; then
+        sudo zypper install -y "$tool"
+        return
+      fi
+      ;;
+    msys*|cygwin*|win32)
+      if command -v winget &>/dev/null; then
+        winget install --silent --accept-package-agreements --accept-source-agreements "$tool"
+        return
+      elif command -v choco &>/dev/null; then
+        choco install -y "$tool"
+        return
+      elif command -v scoop &>/dev/null; then
+        scoop install "$tool"
+        return
+      fi
+      ;;
+  esac
+
+  echo >&2 "ERROR: no supported package manager found to install '$tool'."
+  echo >&2 "Install it manually, then re-run this script."
+  exit 1
+}
+
 for tool in "${TOOLS[@]}"; do
-    command -v "$tool" &>/dev/null || brew install "$tool"
+    command -v "$tool" &>/dev/null || install_tool "$tool"
 done
