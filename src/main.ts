@@ -102,58 +102,93 @@ const pylonMat = new THREE.MeshStandardMaterial({
   color: 0xff66aa, emissive: 0x661133, emissiveIntensity: 0.6,
 });
 
+// --- Seeded RNG (mulberry32) ---
+// Returns a function that yields deterministic floats in [0, 1).
+function makeRng(seed: number): () => number {
+  let s = seed >>> 0;
+  return function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Mix two 32-bit values into a single seed (xmur3-ish).
+function mixSeed(a: number, b: number): number {
+  let h = (a ^ 0x9e3779b9) >>> 0;
+  h = Math.imul(h ^ b, 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+// Per-level base seed; reseeded on restart so each run is reproducible.
+let baseSeed = (Math.random() * 0xffffffff) >>> 0;
+
 // Track which Z chunks have been generated. Chunks are indexed by floor(z / CHUNK_LEN).
 const generatedChunks = new Set<number>();
 
-function tryPlaceInChunk(chunkIndex: number, radius: number, avoidNearOrigin: boolean): { x: number; z: number } | null {
+// Collision check is restricted to obstacles already placed *in this chunk* during this
+// generation pass, so each chunk's layout depends only on its own seed (not on which
+// neighbors happen to be loaded). `placedInChunk` is the running list for this chunk.
+function tryPlaceInChunk(
+  rng: () => number,
+  chunkIndex: number,
+  radius: number,
+  avoidNearOrigin: boolean,
+  placedInChunk: { x: number; z: number; radius: number }[],
+): { x: number; z: number } | null {
   const zMin = chunkIndex * CHUNK_LEN;
-  const zMax = zMin + CHUNK_LEN;
   for (let attempt = 0; attempt < 20; attempt++) {
-    const x = (Math.random() - 0.5) * (LANE_HALF * 2 - 4);
-    const z = zMin + Math.random() * CHUNK_LEN;
+    const x = (rng() - 0.5) * (LANE_HALF * 2 - 4);
+    const z = zMin + rng() * CHUNK_LEN;
     if (avoidNearOrigin && Math.hypot(x, z) < 6) continue;
     let collides = false;
-    for (const o of obstacles) {
-      // Cheap reject: only check obstacles in this chunk band
-      if (o.z < zMin - 2 || o.z > zMax + 2) continue;
-      if (Math.hypot(x - o.x, z - o.z) < radius + o.radius + 1) { collides = true; break; }
+    for (const p of placedInChunk) {
+      if (Math.hypot(x - p.x, z - p.z) < radius + p.radius + 1) { collides = true; break; }
     }
     if (!collides) return { x, z };
   }
   return null;
 }
 
-function spawnRockInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
-  const radius = 0.9 + Math.random() * 0.8;
-  const pos = tryPlaceInChunk(chunkIndex, radius, avoidNearOrigin);
+type Placed = { x: number; z: number; radius: number };
+
+function spawnRockInChunk(rng: () => number, chunkIndex: number, avoidNearOrigin: boolean, placed: Placed[]) {
+  const radius = 0.9 + rng() * 0.8;
+  const pos = tryPlaceInChunk(rng, chunkIndex, radius, avoidNearOrigin, placed);
   if (!pos) return;
   const geo = new THREE.DodecahedronGeometry(radius, 0);
   const mesh = new THREE.Mesh(geo, rockMat);
   mesh.position.set(pos.x, radius * 0.6, pos.z);
-  mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+  mesh.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   scene.add(mesh);
-  obstacles.push({ mesh, extras: [], x: pos.x, z: pos.z, radius: radius * 0.85 });
+  const collisionRadius = radius * 0.85;
+  obstacles.push({ mesh, extras: [], x: pos.x, z: pos.z, radius: collisionRadius });
+  placed.push({ x: pos.x, z: pos.z, radius: collisionRadius });
 }
 
-function spawnCrystalInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
-  const radius = 0.5 + Math.random() * 0.4;
-  const pos = tryPlaceInChunk(chunkIndex, radius, avoidNearOrigin);
+function spawnCrystalInChunk(rng: () => number, chunkIndex: number, avoidNearOrigin: boolean, placed: Placed[]) {
+  const radius = 0.5 + rng() * 0.4;
+  const pos = tryPlaceInChunk(rng, chunkIndex, radius, avoidNearOrigin, placed);
   if (!pos) return;
-  const height = 1.8 + Math.random() * 1.2;
+  const height = 1.8 + rng() * 1.2;
   const geo = new THREE.ConeGeometry(radius, height, 6);
   const mesh = new THREE.Mesh(geo, crystalMat);
   mesh.position.set(pos.x, height / 2, pos.z);
-  mesh.rotation.y = Math.random() * Math.PI;
+  mesh.rotation.y = rng() * Math.PI;
   mesh.castShadow = true;
   scene.add(mesh);
-  obstacles.push({ mesh, extras: [], x: pos.x, z: pos.z, radius: radius * 0.85 });
+  const collisionRadius = radius * 0.85;
+  obstacles.push({ mesh, extras: [], x: pos.x, z: pos.z, radius: collisionRadius });
+  placed.push({ x: pos.x, z: pos.z, radius: collisionRadius });
 }
 
-function spawnPylonInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
+function spawnPylonInChunk(rng: () => number, chunkIndex: number, avoidNearOrigin: boolean, placed: Placed[]) {
   const radius = 0.45;
-  const pos = tryPlaceInChunk(chunkIndex, radius, avoidNearOrigin);
+  const pos = tryPlaceInChunk(rng, chunkIndex, radius, avoidNearOrigin, placed);
   if (!pos) return;
   const height = 3.2;
   const geo = new THREE.CylinderGeometry(radius, radius * 1.3, height, 6);
@@ -165,20 +200,25 @@ function spawnPylonInChunk(chunkIndex: number, avoidNearOrigin: boolean) {
   const cap = new THREE.Mesh(capGeo, crystalMat);
   cap.position.set(pos.x, height + 0.1, pos.z);
   scene.add(cap);
-  obstacles.push({ mesh, extras: [cap], x: pos.x, z: pos.z, radius: radius * 1.3 });
+  const collisionRadius = radius * 1.3;
+  obstacles.push({ mesh, extras: [cap], x: pos.x, z: pos.z, radius: collisionRadius });
+  placed.push({ x: pos.x, z: pos.z, radius: collisionRadius });
 }
 
 function generateChunk(chunkIndex: number) {
   if (generatedChunks.has(chunkIndex)) return;
   generatedChunks.add(chunkIndex);
+  // Each chunk gets its own deterministic RNG keyed by (baseSeed, chunkIndex).
+  const rng = makeRng(mixSeed(baseSeed, chunkIndex));
   // Skip the spawn-area chunk so the player doesn't start clipped into terrain.
   const avoidNearOrigin = chunkIndex === 0 || chunkIndex === -1;
-  const rocks = 2 + Math.floor(Math.random() * 2);
-  const crystals = 1 + Math.floor(Math.random() * 2);
-  const pylons = Math.random() < 0.6 ? 1 : 0;
-  for (let i = 0; i < rocks; i++) spawnRockInChunk(chunkIndex, avoidNearOrigin);
-  for (let i = 0; i < crystals; i++) spawnCrystalInChunk(chunkIndex, avoidNearOrigin);
-  for (let i = 0; i < pylons; i++) spawnPylonInChunk(chunkIndex, avoidNearOrigin);
+  const rocks = 2 + Math.floor(rng() * 2);
+  const crystals = 1 + Math.floor(rng() * 2);
+  const pylons = rng() < 0.6 ? 1 : 0;
+  const placed: Placed[] = [];
+  for (let i = 0; i < rocks; i++) spawnRockInChunk(rng, chunkIndex, avoidNearOrigin, placed);
+  for (let i = 0; i < crystals; i++) spawnCrystalInChunk(rng, chunkIndex, avoidNearOrigin, placed);
+  for (let i = 0; i < pylons; i++) spawnPylonInChunk(rng, chunkIndex, avoidNearOrigin, placed);
 }
 
 function despawnObstacle(o: Obstacle) {
@@ -472,6 +512,8 @@ function restart() {
   for (const o of obstacles) despawnObstacle(o);
   obstacles.length = 0;
   generatedChunks.clear();
+  // New base seed per level — but chunks within the level remain reproducible.
+  baseSeed = (Math.random() * 0xffffffff) >>> 0;
 
   playerGroup.position.set(0, 0, 0);
   playerHP = 5;
