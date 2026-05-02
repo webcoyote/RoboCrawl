@@ -580,6 +580,30 @@ function detonateGrenade(g: Grenade) {
   }
 }
 
+// Push a grenade out of a vertical-cylinder collider (centered at cx,cz with radius r)
+// and reflect its XZ velocity along the surface normal. Returns true on hit.
+const GRENADE_BODY_RADIUS = 0.22;
+function bounceOffCircle(g: Grenade, cx: number, cz: number, r: number): boolean {
+  const dx = g.mesh.position.x - cx;
+  const dz = g.mesh.position.z - cz;
+  const minDist = r + GRENADE_BODY_RADIUS;
+  const distSq = dx * dx + dz * dz;
+  if (distSq >= minDist * minDist || distSq < 1e-6) return false;
+  const dist = Math.sqrt(distSq);
+  const nx = dx / dist;
+  const nz = dz / dist;
+  // Push out to surface
+  g.mesh.position.x = cx + nx * minDist;
+  g.mesh.position.z = cz + nz * minDist;
+  // Reflect the inward component of the XZ velocity
+  const vDotN = g.vel.x * nx + g.vel.z * nz;
+  if (vDotN < 0) {
+    g.vel.x -= (1 + GRENADE_BOUNCE) * vDotN * nx;
+    g.vel.z -= (1 + GRENADE_BOUNCE) * vDotN * nz;
+  }
+  return true;
+}
+
 function updateGrenades(dt: number) {
   if (grenadeCooldown > 0) grenadeCooldown -= dt;
 
@@ -607,6 +631,17 @@ function updateGrenades(dt: number) {
     const limit = LANE_HALF - 0.5;
     if (g.mesh.position.x > limit) { g.mesh.position.x = limit; g.vel.x = -g.vel.x * GRENADE_BOUNCE; }
     if (g.mesh.position.x < -limit) { g.mesh.position.x = -limit; g.vel.x = -g.vel.x * GRENADE_BOUNCE; }
+
+    // Bounce off terrain (cheap broad-phase: skip far-away obstacles).
+    for (const o of obstacles) {
+      if (Math.abs(o.z - g.mesh.position.z) > 4 || Math.abs(o.x - g.mesh.position.x) > 4) continue;
+      bounceOffCircle(g, o.x, o.z, o.radius);
+    }
+    // Bounce off enemies (only those low enough to interact with the grenade).
+    for (const e of enemies) {
+      if (Math.abs(e.mesh.position.z - g.mesh.position.z) > 3 || Math.abs(e.mesh.position.x - g.mesh.position.x) > 3) continue;
+      bounceOffCircle(g, e.mesh.position.x, e.mesh.position.z, e.radius);
+    }
 
     // Tumble visually.
     g.mesh.rotation.x += dt * 6;
