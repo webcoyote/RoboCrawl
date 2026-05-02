@@ -63,6 +63,83 @@ addWall(0, ARENA, ARENA * 2 + wallThickness, wallThickness);
 addWall(-ARENA, 0, wallThickness, ARENA * 2 + wallThickness);
 addWall(ARENA, 0, wallThickness, ARENA * 2 + wallThickness);
 
+// --- Terrain features ---
+// Solid obstacles that block player movement and bullets.
+type Obstacle = { x: number; z: number; radius: number };
+const obstacles: Obstacle[] = [];
+
+const rockMat = new THREE.MeshStandardMaterial({ color: 0x4a5566, roughness: 0.9 });
+const crystalMat = new THREE.MeshStandardMaterial({
+  color: 0x66ffcc, emissive: 0x118866, emissiveIntensity: 0.7, roughness: 0.2,
+});
+const pylonMat = new THREE.MeshStandardMaterial({
+  color: 0xff66aa, emissive: 0x661133, emissiveIntensity: 0.6,
+});
+
+function tryPlace(radius: number, minDistFromCenter: number): { x: number; z: number } | null {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const x = (Math.random() - 0.5) * (ARENA * 2 - 6);
+    const z = (Math.random() - 0.5) * (ARENA * 2 - 6);
+    if (Math.hypot(x, z) < minDistFromCenter) continue;
+    let collides = false;
+    for (const o of obstacles) {
+      if (Math.hypot(x - o.x, z - o.z) < radius + o.radius + 1) { collides = true; break; }
+    }
+    if (!collides) return { x, z };
+  }
+  return null;
+}
+
+function spawnRock() {
+  const radius = 0.9 + Math.random() * 0.8;
+  const pos = tryPlace(radius, 6);
+  if (!pos) return;
+  const geo = new THREE.DodecahedronGeometry(radius, 0);
+  const mesh = new THREE.Mesh(geo, rockMat);
+  mesh.position.set(pos.x, radius * 0.6, pos.z);
+  mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  obstacles.push({ x: pos.x, z: pos.z, radius: radius * 0.85 });
+}
+
+function spawnCrystal() {
+  const radius = 0.5 + Math.random() * 0.4;
+  const pos = tryPlace(radius, 6);
+  if (!pos) return;
+  const height = 1.8 + Math.random() * 1.2;
+  const geo = new THREE.ConeGeometry(radius, height, 6);
+  const mesh = new THREE.Mesh(geo, crystalMat);
+  mesh.position.set(pos.x, height / 2, pos.z);
+  mesh.rotation.y = Math.random() * Math.PI;
+  mesh.castShadow = true;
+  scene.add(mesh);
+  obstacles.push({ x: pos.x, z: pos.z, radius: radius * 0.85 });
+}
+
+function spawnPylon() {
+  const radius = 0.45;
+  const pos = tryPlace(radius, 8);
+  if (!pos) return;
+  const height = 3.2;
+  const geo = new THREE.CylinderGeometry(radius, radius * 1.3, height, 6);
+  const mesh = new THREE.Mesh(geo, pylonMat);
+  mesh.position.set(pos.x, height / 2, pos.z);
+  mesh.castShadow = true;
+  scene.add(mesh);
+  // Glow cap
+  const capGeo = new THREE.SphereGeometry(radius * 0.9, 12, 8);
+  const cap = new THREE.Mesh(capGeo, crystalMat);
+  cap.position.set(pos.x, height + 0.1, pos.z);
+  scene.add(cap);
+  obstacles.push({ x: pos.x, z: pos.z, radius: radius * 1.3 });
+}
+
+for (let i = 0; i < 12; i++) spawnRock();
+for (let i = 0; i < 10; i++) spawnCrystal();
+for (let i = 0; i < 6; i++) spawnPylon();
+
 // --- Player ---
 const playerRadius = 0.5;
 const playerGroup = new THREE.Group();
@@ -171,16 +248,22 @@ const brute = {
 };
 
 function spawnEnemyAtEdge() {
-  // Choose random edge spawn outside player vicinity
-  let x: number, z: number;
-  do {
+  // Choose random edge spawn outside player vicinity and not inside an obstacle.
+  let x = 0, z = 0;
+  for (let attempt = 0; attempt < 30; attempt++) {
     const side = Math.floor(Math.random() * 4);
     const t = (Math.random() - 0.5) * (ARENA * 2 - 4);
     if (side === 0) { x = t; z = -ARENA + 2; }
     else if (side === 1) { x = t; z = ARENA - 2; }
     else if (side === 2) { x = -ARENA + 2; z = t; }
     else { x = ARENA - 2; z = t; }
-  } while (Math.hypot(x - playerGroup.position.x, z - playerGroup.position.z) < 12);
+    if (Math.hypot(x - playerGroup.position.x, z - playerGroup.position.z) < 12) continue;
+    let blocked = false;
+    for (const o of obstacles) {
+      if (Math.hypot(x - o.x, z - o.z) < o.radius + 1.2) { blocked = true; break; }
+    }
+    if (!blocked) break;
+  }
 
   const isBrute = Math.random() < Math.min(0.15 + wave * 0.04, 0.5);
   const def = isBrute ? brute : grunt;
@@ -243,6 +326,32 @@ const clock = new THREE.Clock();
 
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 
+// Push a circle out of any overlapping obstacles. Mutates pos.
+function resolveObstacles(pos: { x: number; z: number }, radius: number) {
+  for (const o of obstacles) {
+    const dx = pos.x - o.x;
+    const dz = pos.z - o.z;
+    const minDist = radius + o.radius;
+    const distSq = dx * dx + dz * dz;
+    if (distSq < minDist * minDist && distSq > 0.0001) {
+      const dist = Math.sqrt(distSq);
+      const push = (minDist - dist) / dist;
+      pos.x += dx * push;
+      pos.z += dz * push;
+    }
+  }
+  return pos;
+}
+
+function bulletHitsObstacle(x: number, z: number) {
+  for (const o of obstacles) {
+    const dx = x - o.x;
+    const dz = z - o.z;
+    if (dx * dx + dz * dz < (o.radius + 0.18) * (o.radius + 0.18)) return true;
+  }
+  return false;
+}
+
 function animate() {
   requestAnimationFrame(animate);
 
@@ -272,6 +381,8 @@ function animate() {
     const limit = ARENA - 1.2;
     playerGroup.position.x = clamp(playerGroup.position.x, -limit, limit);
     playerGroup.position.z = clamp(playerGroup.position.z, -limit, limit);
+
+    resolveObstacles(playerGroup.position, playerRadius);
 
     // --- Aim: project mouse onto ground plane
     raycaster.setFromCamera(mouseNDC, camera);
@@ -319,6 +430,8 @@ function animate() {
         }
       }
 
+      if (!hit && bulletHitsObstacle(b.mesh.position.x, b.mesh.position.z)) hit = true;
+
       const oob = Math.abs(b.mesh.position.x) > ARENA || Math.abs(b.mesh.position.z) > ARENA;
       if (hit || b.life <= 0 || oob) {
         scene.remove(b.mesh);
@@ -333,6 +446,7 @@ function animate() {
       const dist = Math.hypot(dx, dz) || 1;
       e.mesh.position.x += (dx / dist) * e.speed * dt;
       e.mesh.position.z += (dz / dist) * e.speed * dt;
+      resolveObstacles(e.mesh.position, e.radius);
       e.mesh.rotation.y += dt * 2;
 
       // Touch damage
