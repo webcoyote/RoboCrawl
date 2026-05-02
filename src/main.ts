@@ -307,8 +307,8 @@ function despawnObstacle(o: Obstacle) {
 // `mistEdgeZ` is the leading (front) edge in world Z. Player is "inside the mist"
 // when player.z >= mistEdgeZ (i.e. behind the edge). Forward in this game is -Z.
 const MIST_INITIAL_OFFSET = 30;   // start this far behind the player
-const MIST_BASE_SPEED = 2.5;       // m/s forward
-const MIST_RAMP_PER_METER = 0.01;  // mist gets faster as you go further
+const MIST_BASE_SPEED = 1.25;      // m/s forward
+const MIST_RAMP_PER_METER = 0.005; // mist gets faster as you go further
 const MIST_MAX_DISTANCE = 60;      // never trail farther than this behind player
 const MIST_DAMAGE_INTERVAL = 0.5;  // seconds between damage ticks while inside
 let mistEdgeZ = MIST_INITIAL_OFFSET;
