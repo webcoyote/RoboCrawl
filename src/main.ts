@@ -826,12 +826,15 @@ function refreshCheatMenuSelection() {
   });
 }
 
+const pauseTitleEl = document.getElementById('pauseTitle')!;
 function showCheatMenu() {
   refreshCheatMenuSelection();
   cheatMenuEl.style.display = 'block';
+  pauseTitleEl.style.display = 'block';
 }
 function hideCheatMenu() {
   cheatMenuEl.style.display = 'none';
+  pauseTitleEl.style.display = 'none';
 }
 
 function selectCheatPower(power: PowerType | null) {

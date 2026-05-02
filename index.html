@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Three.js Game</title>
+  <title>RoboCrawl</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { overflow: hidden; background: #000; cursor: crosshair; }
@@ -109,6 +109,21 @@
       color: #889;
       text-align: center;
     }
+    #pauseTitle {
+      position: fixed;
+      top: 8vh;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #aad8ff;
+      font-family: monospace;
+      font-size: 88px;
+      font-weight: bold;
+      letter-spacing: 0.18em;
+      text-shadow: 0 0 14px rgba(80, 160, 220, 0.6),
+                   0 0 32px rgba(80, 160, 220, 0.35);
+      pointer-events: none;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -126,6 +141,7 @@
     <div id="shield" style="display:none; font-weight:bold;"></div>
   </div>
   <div id="damageFlash"></div>
+  <div id="pauseTitle">RoboCrawl</div>
   <div id="overlay"></div>
   <div id="cheatMenu">
     <h2>CHEAT MENU</h2>
